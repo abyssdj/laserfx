@@ -1,0 +1,32 @@
+name: Build LaserFX
+on:
+  push:
+  workflow_dispatch:
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Linux system packages
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y python3-tk libportaudio2
+      - run: pip install numpy sounddevice pyusb libusb-package pyinstaller
+      - name: Smoke test (analysis + libusb backend present)
+        shell: bash
+        run: |
+          python tools/make_test_track.py test.wav
+          python -m laserfx test.wav --analyze
+          python -c "import libusb_package; print('libusb backend:', libusb_package.get_libusb1_backend())"
+          python -c "import tkinter; print('tkinter ok')"
+      - run: python build.py
+      - uses: actions/upload-artifact@v4
+        with:
+          name: LaserFX-${{ runner.os }}
+          path: dist/*
