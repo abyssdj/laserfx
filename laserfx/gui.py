@@ -119,6 +119,7 @@ class App:
         f.pack(fill="x", pady=4)
         self.bright = self._slider(f, "Brightness", 0, 1, self.settings.brightness, 0, lambda v: setattr(self.settings, "brightness", v))
         self.size = self._slider(f, "Size", 0.1, 1, self.settings.size, 1, lambda v: setattr(self.settings, "size", v))
+        self.detail = self._slider(f, "Detail", 0.2, 1, self.settings.detail, 7, lambda v: setattr(self.settings, "detail", v))
         ttk.Label(f, text="Points/sec").grid(row=2, column=0, sticky="w")
         self.pps_sp = ttk.Spinbox(f, from_=5000, to=60000, increment=1000, width=8, command=self._apply_numbers)
         self.pps_sp.set(self.settings.pps)
@@ -148,6 +149,10 @@ class App:
         self.sec_box.grid(row=6, column=1, columnspan=2, sticky="w")
         self.sec_box.bind("<<ComboboxSelected>>", lambda e: setattr(
             self.settings, "section", None if self.sec_box.get() == "Auto" else self.sec_box.get()))
+        self.strobe_var = tk.BooleanVar(value=True)
+        ttk.Checkbutton(f, text="Strobe effects (flashing: disable for photosensitive audiences)", variable=self.strobe_var,
+                        command=lambda: setattr(self.settings, "strobe", self.strobe_var.get())).grid(
+            row=8, column=0, columnspan=3, sticky="w", pady=(4, 0))
         f.columnconfigure(2, weight=1)
 
         self.black_btn = tk.Button(right, text="BLACKOUT  (space)", font=("Helvetica", 14, "bold"), bg="#8a1c1c", fg="white",
@@ -267,7 +272,7 @@ class App:
                 d.config(bg="#e8e8ee" if on else "#333", fg="black" if on else "#888")
             for n in self.meters:
                 self.meters[n]["value"] = min(getattr(f, n), 1.0)
-            self.info_var.set(f"scene: {snap.scene or '-'}   {len(snap.frame)} pts" + ("   STATIC GUARD" if snap.tripped else ""))
+            self.info_var.set(f"scene: {snap.scene or '-'}   {len(snap.frame)} pts  {self.settings.pps / len(snap.frame):.0f} fps" + ("   STATIC GUARD" if snap.tripped else ""))
             self._draw(snap.frame)
             log = [f"{int(t // 60)}:{t % 60:04.1f}  {s}" for t, s in snap.log][-8:]
             if self.log_box.size() != len(log) or (log and self.log_box.get(tk.END) != log[-1]):

@@ -26,7 +26,7 @@ def build_parser():
     p.add_argument("--helios-lib", help="path to the HeliosDacAPI shared library")
     p.add_argument("--helios-index", type=int, default=0)
     p.add_argument("--pps", type=int, default=30000, help="points per second (scanner rating)")
-    p.add_argument("--points", type=int, default=900, help="target points per frame")
+    p.add_argument("--points", type=int, default=700, help="target points per frame (capped to pps/30 so refresh stays >= 30 fps)")
     p.add_argument("--size", type=float, default=0.6, help="projection size 0..1 (keep small until tuned)")
     p.add_argument("--brightness", type=float, default=0.5)
     p.add_argument("--flip-x", action="store_true")
@@ -35,6 +35,8 @@ def build_parser():
     p.add_argument("--no-play", action="store_true", help="do not play the file through speakers")
     p.add_argument("--lead", type=float, default=0.0, help="ms: >0 lasers earlier, <0 later (audio output latency)")
     p.add_argument("--scene", choices=sorted(SCENES), help="force one scene")
+    p.add_argument("--detail", type=float, default=0.5, help="0.2 sparse .. 1.0 busy")
+    p.add_argument("--no-strobe", action="store_true", help="keep strobing drop scenes continuously lit")
     p.add_argument("--seed", type=int, default=1)
     p.add_argument("--sr", type=int, default=44100)
     return p
@@ -66,7 +68,7 @@ def cmd_gallery(path, a):
         f = Features(bpm=128, locked=True, beat_phase=0.15, beat_pulse=0.65, beat_count=9, level=0.8,
                      kick=0.6, section=sec, build=0.6,
                      wave=(np.sin(np.arange(1024) * 0.15) * 0.6 + rng.normal(0, 0.05, 1024)).astype(np.float32))
-        c = Ctx(f, 9.15, 0.5, rng)
+        c = Ctx(f, 9.15, 0.5, rng, rt=9.15)
         frames.append(compose(SCENES[name](c), a.points, size=1.0))
         titles.append(f"{name} ({len(frames[-1])} pts)")
     save_png(frames, titles, path)
@@ -120,6 +122,8 @@ def main(argv=None):
 
     an = audio.Analyzer(a.sr)
     eng = FXEngine(a.seed, a.scene)
+    eng.strobe_enabled, eng.detail = not a.no_strobe, a.detail
+    budget = max(100, min(a.points, a.pps // 30))
     safety = SafetyLimiter(a.brightness)
     out = make_output(a)
     if a.output != "helios":
@@ -132,7 +136,7 @@ def main(argv=None):
             if len(chunk):
                 feats = an.process(chunk)
             paths, scene = eng.update(feats)
-            frame = safety.apply(compose(paths, a.points, size=a.size))
+            frame = safety.apply(compose(paths, budget, size=a.size))
             out.send(frame)
             now = time.perf_counter()
             if now - last_print > 0.25:

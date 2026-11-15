@@ -10,13 +10,56 @@ def blank_frame(n=64):
     return np.zeros((n, 5), np.float32)
 
 
-def _blank(a, b, n):
-    t = np.linspace(0, 1, n)[:, None]
-    xy = np.asarray(a) + (np.asarray(b) - np.asarray(a)) * t
+def _blank(a, b, n, ease=True):
+    t = np.linspace(0, 1, n)
+    if ease:                                   # smoothstep: gentle accel/decel for the galvos
+        t = t * t * (3 - 2 * t)
+    a, b = np.asarray(a), np.asarray(b)
+    xy = a + (b - a) * t[:, None]
     return np.hstack([xy, np.zeros((n, 3))])
 
 
-def compose(paths, budget=900, max_points=4000, size=0.8, settle=3, jump_scale=20):
+def _order(items):
+    """Greedy nearest-neighbour ordering (paths may be reversed) to minimise blanked travel.
+    The first path (the scene's most important one) stays first."""
+    rest, out = list(items[1:]), [items[0]]
+    while rest:
+        end = out[-1][0][-1, :2]
+        best, flip, bd = 0, False, 1e9
+        for i, (V, _, _) in enumerate(rest):
+            d0, d1 = np.hypot(*(V[0, :2] - end)), np.hypot(*(V[-1, :2] - end))
+            if d0 < bd:
+                best, flip, bd = i, False, d0
+            if d1 < bd:
+                best, flip, bd = i, True, d1
+        V, L, d = rest.pop(best)
+        out.append((V[::-1], L[::-1], d) if flip else (V, L, d))
+    return out
+
+
+def _corner_dwell(xy, dwell):
+    """Points to hold at each vertex: `dwell` at a 90 degree corner, scaling with the turning angle, none on curves."""
+    n = len(xy)
+    d = np.zeros(n, int)
+    if dwell <= 0 or n < 3:
+        return d
+    v = np.diff(xy, axis=0)
+    ok = np.hypot(v[:, 0], v[:, 1]) > 1e-9
+    a = np.arctan2(v[:, 1], v[:, 0])
+    turn = np.abs((np.diff(a) + np.pi) % (2 * np.pi) - np.pi)
+    turn = np.where(ok[:-1] & ok[1:], turn, 0.0)
+    d[1:-1] = np.round(dwell * turn / (np.pi / 2)).astype(int)
+    d[-1] = 1
+    return d
+
+
+def _jump_points(dist, jump_scale=20, max_step=0.04):
+    """Blanked points for a jump: enough that the eased peak speed (1.5x average) stays under max_step per point."""
+    return max(4 + int(dist * jump_scale), int(np.ceil(dist * 1.5 / max_step)))
+
+
+def compose(paths, budget=800, max_points=4000, size=0.8, settle=2, jump_scale=20, min_spacing=0.015,
+            max_blank_frac=0.4):
     items = []
     for p in paths:
         if len(p.pts) < 2:
@@ -24,33 +67,45 @@ def compose(paths, budget=900, max_points=4000, size=0.8, settle=3, jump_scale=2
         xy = np.clip(p.pts * size, -1, 1)
         V = np.hstack([xy, np.broadcast_to(p.rgb, (len(xy), 3))])
         L = np.hypot(*np.diff(xy, axis=0).T)
+        if L.sum() < 1e-4:
+            continue
         items.append((V, L, p.dwell))
     if not items:
-        return blank_frame()
-    total_len = sum(L.sum() for _, L, _ in items)
-    if total_len < 1e-6:
-        return blank_frame()
+        return blank_frame(budget)
+    items = _order(items)
 
-    ends = [(V[-1, :2], items[(i + 1) % len(items)][0][0, :2]) for i, (V, _, _) in enumerate(items)]
-    overhead = sum(2 * settle + 4 + int(np.hypot(*(b - a)) * jump_scale) for a, b in ends)
-    overhead += sum(d * len(V) for V, _, d in items)
-    spacing = total_len / max(budget - overhead, 40)
+    def overhead_of(its):
+        o = 0
+        for i, (V, _, _) in enumerate(its):
+            b = its[(i + 1) % len(its)][0][0, :2]
+            o += 2 * settle + _jump_points(np.hypot(*(b - V[-1, :2])), jump_scale)
+        return o
+
+    # too much blanking makes the picture dim and the scanners work hard: drop the lowest-priority paths
+    while len(items) > 3 and overhead_of(items) > max_blank_frac * budget:
+        items.pop()
+
+    dw = [_corner_dwell(V[:, :2], d) for V, _, d in items]
+    overhead = overhead_of(items) + sum(int(x.sum()) for x in dw)
+    total_len = sum(L.sum() for _, L, _ in items)
+    spacing = max(total_len / max(budget - overhead, 40), min_spacing)
 
     out = []
-    for i, (V, L, dwell) in enumerate(items):
+    for i, (V, L, _) in enumerate(items):
         counts = np.maximum(1, np.round(L / spacing)).astype(int)
         seg = np.repeat(np.arange(len(L)), counts)
         starts = np.cumsum(counts) - counts
         t = (np.arange(len(seg)) - np.repeat(starts, counts)) / np.repeat(counts, counts)
         P = V[seg] + (V[seg + 1] - V[seg]) * t[:, None]
         P = np.vstack([P, V[-1]])
-        if dwell:
-            at = np.repeat(np.append(starts, len(P) - 1), dwell)
+        if dw[i].any():
+            at = np.repeat(np.append(starts, len(P) - 1), dw[i])
             P = np.insert(P, at, P[at], axis=0)
         out.append(P)
-        a, b = ends[i]
-        n = 4 + int(np.hypot(*(b - a)) * jump_scale)
-        out += [_blank(a, a, settle), _blank(a, b, n), _blank(b, b, settle)]
+        a = V[-1, :2]
+        b = items[(i + 1) % len(items)][0][0, :2]
+        n = _jump_points(np.hypot(*(b - a)), jump_scale)
+        out += [_blank(a, a, settle, False), _blank(a, b, n), _blank(b, b, settle, False)]
 
     f = np.vstack(out).astype(np.float32)
     if len(f) > max_points:

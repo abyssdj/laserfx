@@ -17,7 +17,7 @@ from .render import SafetyLimiter, blank_frame, compose
 class Settings:
     brightness: float = 0.5
     size: float = 0.6
-    points: int = 900
+    points: int = 700
     pps: int = 30000
     flip_x: bool = False
     flip_y: bool = False
@@ -25,6 +25,9 @@ class Settings:
     scene: str | None = None        # None = automatic
     section: str | None = None      # None = automatic
     blackout: bool = False
+    strobe: bool = True
+    detail: float = 0.5
+    min_fps: int = 30           # frame budget is capped so the picture refreshes at least this often
 
 
 @dataclass
@@ -89,12 +92,14 @@ class Session:
                     eng.force, last_force = s.scene, s.scene
                     eng.section = feats.section
                     eng._pick()
+                eng.strobe_enabled, eng.detail = s.strobe, s.detail
+                budget = max(100, min(int(s.points), s.pps // s.min_fps))
                 paths, scene = eng.update(feats)
                 safety.brightness = s.brightness
                 if s.blackout:
-                    frame = blank_frame()
+                    frame = blank_frame(budget)
                 else:
-                    frame = safety.apply(compose(paths, int(s.points), size=s.size))
+                    frame = safety.apply(compose(paths, budget, size=s.size))
                 out.pps = s.pps
                 if hasattr(out, "flip"):
                     out.flip = dict(flip_x=s.flip_x, flip_y=s.flip_y, swap_xy=s.swap_xy)

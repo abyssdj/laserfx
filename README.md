@@ -11,6 +11,28 @@ the beam out of audience areas, and have a hardware stop button. The software ma
 * A static-beam guard blanks any lit, near-stationary pattern. Output blanks on silence and on exit/Ctrl+C.
 * Check `--pps` against your scanners' rating; large scan angles at 30 kpps can overdrive cheap galvos.
 
+## Scenes by section
+* **BREAKDOWN** - slow and smooth: `sky_fan` (swaying canopy of beams from floor and ceiling), `sky_cross` (two fans sweeping
+  through each other), `scan_sweep` (rippling scan lines with fading echoes), plus `breath` and `spiral_slow`.
+* **BUILD** - accelerating: `riser` (contracting ring + spinning rays), `build_fan`, `build_scan`. Speed ramps with the detected
+  build amount and fades from blue to white/red.
+* **DROP** - strobing geometric beams, snapped to the beat: `strobe_poly` (nested triangle/square/hexagon/pentagon),
+  `strobe_beams` (horizontal, vertical, diagonal, box+cross bar sets), `strobe_burst`, plus `drop_blast`.
+* **MAIN** - tunnel, beam fan, starburst, lissajous, grid, spiral, scope, rings.
+Strobing flashes at up to 2 flashes per beat (about 4 Hz at 128 BPM). Flashing light can trigger seizures in photosensitive people:
+untick **Strobe effects** in the GUI (or use `--no-strobe`) for such audiences and warn your audience as required at your venue.
+Force any scene or section from the GUI to rehearse.
+
+## Scanner-friendly rendering
+* **Detail** slider (GUI) / `--detail` (0.2 sparse .. 1.0 busy, default 0.5) scales how many beams, rings and rays each scene draws.
+  Typical scene now uses ~6 paths instead of ~9; busy scenes like starburst went from 22 paths to 10.
+* Frame size is capped at `pps / 30` points so the picture always refreshes at 30 fps or better (default 700 points at 30 kpps = 43 fps);
+  lower your `--pps` for slower scanners and the budget shrinks automatically.
+* Paths are re-ordered to minimise blanked travel and dropped lowest-priority-first if blanking would exceed 40% of the frame.
+* Jumps between shapes are eased (smooth start/stop) and spread over enough points that peak speed per point stays under a cap;
+  corners hold points in proportion to how sharp they are, curves hold none.
+* `python tools/scanner_stats.py 700 30000` prints paths, blanking % and peak step per scene so you can tune for your scanners.
+
 ## Standalone app (GUI)
 Run with no arguments (`python -m laserfx`, or the packaged **LaserFX** app) to open the GUI: preview window, BPM / section /
 beat display, source picker (file or live input), Helios output with an ARM tick-box, brightness / size / flip controls,
@@ -50,7 +72,7 @@ Useful flags: `--pps`, `--points`, `--flip-x/--flip-y/--swap-xy`, `--scene NAME`
 ## Ideas borrowed / next steps (from Liberation + Libera)
 Liberation is built on BPM-timed looping clips, per-laser zones and masks, and chainable effects; Libera is its open-source
 C++ layer for Helios, Ether Dream, IDN and LaserCube. Natural extensions: more outputs behind the same `send(frame)`
-interface (Ether Dream/IDN), zones/masks and per-laser geometry correction, MIDI control, and a manual section override.
+interface (Ether Dream/IDN), zones/masks and per-laser geometry correction, MIDI control, (a manual section override now exists in the GUI).
 
 ## Status
 Tested here: analysis on a synthetic track, scene rendering, loop speed, the Helios packet encoding against a mock USB device,
