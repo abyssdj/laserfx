@@ -1,0 +1,5 @@
+numpy
+pyusb
+libusb-package
+sounddevice      # optional: live input + playback
+matplotlib       # only for --gallery / CLI preview
