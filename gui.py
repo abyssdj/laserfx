@@ -40,8 +40,8 @@ class App:
         self.root = root
         root.title("LaserFX")
         root.configure(bg=C["bg"])
-        root.minsize(1040, 680)
-        self.canvas = tk.Canvas(root, bg=C["bg"], highlightthickness=0, bd=0, width=1100, height=700)
+        root.minsize(1040, 720)
+        self.canvas = tk.Canvas(root, bg=C["bg"], highlightthickness=0, bd=0, width=1100, height=760)
         self.canvas.pack(fill="both", expand=True)
         self.ui = UI(root, self.canvas, k)
         self.settings = Settings()
@@ -54,7 +54,7 @@ class App:
         self._last_snap = None
         self._last_hud_t = 0.0
         self._build()
-        self._layout(1100, 700)
+        self._layout(1100, 760)
         self.canvas.bind("<Configure>", lambda e: self._layout(e.width / k, e.height / k))
         root.bind("<space>", lambda e: self._toggle_blackout())
         root.bind("<Escape>", lambda e: self._toggle_blackout())
@@ -113,21 +113,21 @@ class App:
                         lambda v: setattr(s, "section", None if v == "auto" else v)))
 
         S = self.scan = []
-        reg(S, Stepper(u, "Points per second", lambda: s.pps, lambda v: (setattr(s, "pps", int(v)), self._fps()), 1000,
-                       5000, 60000, "{:,}"))
-        reg(S, Stepper(u, "Points per frame", lambda: s.points, lambda v: (setattr(s, "points", int(v)), self._fps()),
-                       50, 100, 3000, "{:,}"))
+        self.st_pps = reg(S, Stepper(u, "Points per second", lambda: s.pps, lambda v: (setattr(s, "pps", int(v)), self._fps()),
+                                     1000, 5000, 60000, "{:,}"))
+        self.st_pts = reg(S, Stepper(u, "Points per frame", lambda: s.points, lambda v: (setattr(s, "points", int(v)), self._fps()),
+                                     50, 100, 3000, "{:,}"))
         self.fps_lbl = reg(S, Label(u, "", "mid", C["ok"], "w"))
-        self.cap_galvo = reg(S, Label(u, "GALVO CALIBRATION", "tiny", C["dim"]))
-        reg(S, Stepper(u, "Color shift (galvo lag)", lambda: s.galvo_lag, lambda v: setattr(s, "galvo_lag", int(v)),
-                       1, -10, 10, "{:+d} pts"))
-        reg(S, Stepper(u, "Corner dwell", lambda: s.corner_dwell, lambda v: setattr(s, "corner_dwell", int(v)),
-                       1, 0, 8, "{:d} pts"))
-        reg(S, Stepper(u, "Blanking delay", lambda: s.blank_delay, lambda v: setattr(s, "blank_delay", int(v)),
-                       1, 0, 8, "{:d} pts"))
+        self.cap_galvo = reg(S, Label(u, "GALVO & COLOR LAG", "tiny", C["dim"]))
+        self.st_lag = reg(S, Stepper(u, "Color shift (galvo lag)", lambda: s.galvo_lag, lambda v: setattr(s, "galvo_lag", int(v)),
+                                     1, -10, 10, "{:+d} pts"))
+        self.st_dwell = reg(S, Stepper(u, "Corner dwell", lambda: s.corner_dwell, lambda v: setattr(s, "corner_dwell", int(v)),
+                                       1, 0, 6, "{:d} pts"))
+        self.st_blank = reg(S, Stepper(u, "Blanking delay", lambda: s.blank_delay, lambda v: setattr(s, "blank_delay", int(v)),
+                                       1, 0, 6, "{:d} pts"))
         self.cap_flip = reg(S, Label(u, "ORIENTATION", "tiny", C["dim"]))
-        for t, n in (("Flip X", "flip_x"), ("Flip Y", "flip_y"), ("Swap X/Y", "swap_xy")):
-            reg(S, Chip(u, t, lambda n=n: getattr(s, n), lambda v, n=n: setattr(s, n, v)))
+        self.chips_flip = [reg(S, Chip(u, t, lambda n=n: getattr(s, n), lambda v, n=n: setattr(s, n, v)))
+                           for t, n in (("Flip X", "flip_x"), ("Flip Y", "flip_y"), ("Swap X/Y", "swap_xy"))]
 
         self.btn_start = Button(u, "Start", self._start_stop, "success", "h")
         self.btn_black = Button(u, "Blackout  ·  Space", self._toggle_blackout, "outline_danger", "h")
@@ -185,16 +185,16 @@ class App:
 
         # scanner tab
         y = by + 14
-        self.scan[0].place(ix, y, iw, 38)
-        self.scan[1].place(ix, y + 46, iw, 38)
-        self.fps_lbl.place(ix, y + 90, iw, 22)
-        self.cap_galvo.place(ix, y + 122, iw, 12)
-        self.scan[4].place(ix, y + 140, iw, 38)
-        self.scan[5].place(ix, y + 186, iw, 38)
-        self.scan[6].place(ix, y + 232, iw, 38)
-        self.cap_flip.place(ix, y + 284, iw, 12)
-        for i, c in enumerate(self.scan[8:11]):
-            c.place(ix + i * 112, y + 302, 100, 32)
+        self.st_pps.place(ix, y, iw, 34)
+        self.st_pts.place(ix, y + 40, iw, 34)
+        self.fps_lbl.place(ix, y + 80, iw, 20)
+        self.cap_galvo.place(ix, y + 110, iw, 12)
+        self.st_lag.place(ix, y + 126, iw, 34)
+        self.st_dwell.place(ix, y + 166, iw, 34)
+        self.st_blank.place(ix, y + 206, iw, 34)
+        self.cap_flip.place(ix, y + 252, iw, 12)
+        for i, c in enumerate(self.chips_flip):
+            c.place(ix + i * 112, y + 270, 104, 32)
         self._apply_visibility()
 
     def _apply_visibility(self):
@@ -221,7 +221,7 @@ class App:
 
     def _fps(self):
         s = self.settings
-        n = max(80, min(s.points, s.pps // max(s.min_fps, 1)))
+        n = max(90, min(s.points, s.pps // max(s.min_fps, 1)))
         fps = s.pps / n
         self.fps_lbl.text = f"{fps:.0f} fps refresh" + ("   (frame capped)" if n < s.points else "")
         self.fps_lbl.color = C["ok"] if fps >= 60 else C["warn"]
@@ -347,7 +347,7 @@ def main():
         k = min(max(root.winfo_fpixels("1i") / 96.0, 1.0), 2.5)
     except Exception:  # noqa: BLE001
         k = 1.0
-    root.geometry(f"{int(1100 * k)}x{int(700 * k)}")
+    root.geometry(f"{int(1100 * k)}x{int(760 * k)}")
     App(root, k)
     root.mainloop()
 
