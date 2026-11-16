@@ -1,0 +1,1 @@
+def askopenfilename(**kw): return ""

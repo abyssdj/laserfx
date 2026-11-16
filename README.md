@@ -34,9 +34,12 @@ Force any scene or section from the GUI to rehearse.
 * `python tools/scanner_stats.py 700 30000` prints paths, blanking % and peak step per scene so you can tune for your scanners.
 
 ## Standalone app (GUI)
-Run with no arguments (`python -m laserfx`, or the packaged **LaserFX** app) to open the GUI: preview window, BPM / section /
-beat display, source picker (file or live input), Helios output with an ARM tick-box, brightness / size / flip controls,
-scene + section overrides and a BLACKOUT button (space bar).
+Run with no arguments (`python -m laserfx`, or the packaged **LaserFX** app) to open the GUI: a dark, flat, rounded interface
+drawn on one tkinter canvas (no extra packages; scales on high-DPI screens). Left: live laser preview with glow, big BPM,
+section badge, beat 1-2-3-4 indicator, bass/mid/high meters and a section timeline. Right: **Setup** (audio file or live input,
+preview or Helios output, ARM switch), **Look** (brightness, size, detail, strobe, scene and section overrides) and
+**Scanner** (points per second / per frame with live refresh rate, flip / swap). Start/Stop and BLACKOUT (space bar or Esc) are always visible.
+`python tools/gui_preview.py track.wav outdir` renders screenshots of the GUI without a display (uses a strict fake tkinter + Pillow).
 **Build the single-file app:** `pip install numpy sounddevice pyusb libusb-package pyinstaller` then `python build.py`
 (PyInstaller builds only for the OS it runs on). Or push this folder to GitHub: the included Action builds Windows, macOS and
 Linux executables as downloadable artifacts. The result bundles Python, numpy, libusb and PortAudio, so end users install nothing.
