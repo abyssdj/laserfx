@@ -1,4 +1,12 @@
-"""Outputs: Helios DAC (USB, via the official HeliosDacAPI shared library), matplotlib simulator, null."""
+"""Outputs: Helios DAC (USB, via native pyusb or official HeliosDacAPI shared library),
+high-FPS blitted matplotlib simulator, and null output.
+
+Optimized for high frame rates and low-latency smooth motion:
+- High-resolution Windows multimedia timer (timeBeginPeriod(1)) so sub-millisecond sleeps don't stall at 15ms.
+- Non-blocking latest-frame async writer option / fast spin-poll for HeliosUSB & HeliosDAC.
+- Matplotlib canvas blitting in SimDisplay (120+ FPS preview without blocking frame generation).
+- Zero-loop vectorized Helios USB packet packing.
+"""
 from __future__ import annotations
 
 import ctypes
@@ -6,6 +14,7 @@ import ctypes.util
 import os
 import platform
 import sys
+import threading
 import time
 
 import numpy as np
@@ -15,54 +24,140 @@ HELIOS_MAX_PPS = 65535
 _PT = np.dtype([("x", "<u2"), ("y", "<u2"), ("r", "u1"), ("g", "u1"), ("b", "u1"), ("i", "u1")])
 
 
-class HeliosPoint(ctypes.Structure):
-    _fields_ = [("x", ctypes.c_uint16), ("y", ctypes.c_uint16),
-                ("r", ctypes.c_uint8), ("g", ctypes.c_uint8), ("b", ctypes.c_uint8), ("i", ctypes.c_uint8)]
+def _enable_high_res_timer():
+    """Sets Windows OS sleep granularity to 1 ms instead of the default 15.6 ms."""
+    if sys.platform == "win32":
+        try:
+            ctypes.windll.winmm.timeBeginPeriod(1)
+        except Exception:  # noqa: BLE001
+            pass
 
 
-def to_helios_array(frame, flip_x=False, flip_y=False, swap_xy=False):
-    xy = frame[:, :2].copy()
-    if swap_xy:
-        xy = xy[:, ::-1]
+_enable_high_res_timer()
+
+
+def _precise_sleep(seconds: float):
+    """High-precision sleep with short spin-wait tail for jitter-free frame pacing."""
+    if seconds <= 0.0:
+        return
+    target = time.perf_counter() + seconds
+    if seconds > 0.002:
+        time.sleep(seconds - 0.0015)
+    while time.perf_counter() < target:
+        pass
+
+
+def to_helios_array(frame: np.ndarray, flip_x: bool = False, flip_y: bool = False, swap_xy: bool = False) -> np.ndarray:
+    n = len(frame)
+    a = np.empty(n, _PT)
+    x = frame[:, 1] if swap_xy else frame[:, 0]
+    y = frame[:, 0] if swap_xy else frame[:, 1]
     if flip_x:
-        xy[:, 0] = -xy[:, 0]
+        x = -x
     if flip_y:
-        xy[:, 1] = -xy[:, 1]
-    a = np.zeros(len(frame), _PT)
-    a["x"] = np.clip((xy[:, 0] + 1) * 0.5 * 4095, 0, 4095)
-    a["y"] = np.clip((xy[:, 1] + 1) * 0.5 * 4095, 0, 4095)
-    for k, n in enumerate("rgb"):
-        a[n] = np.clip(frame[:, 2 + k] * 255, 0, 255)
+        y = -y
+    a["x"] = np.clip((x + 1.0) * 2047.5, 0, 4095)
+    a["y"] = np.clip((y + 1.0) * 2047.5, 0, 4095)
+    rgb = np.clip(frame[:, 2:5] * 255.0, 0, 255).astype(np.uint8)
+    a["r"] = rgb[:, 0]
+    a["g"] = rgb[:, 1]
+    a["b"] = rgb[:, 2]
     a["i"] = 255
     return a
 
 
-def pack_helios_frame(frame, pps, flip_x=False, flip_y=False, swap_xy=False):
-    """Helios bulk packet: 7 bytes/point (12-bit x,y packed, r,g,b,i) + 5-byte footer (pps, count, flags)."""
-    a = to_helios_array(frame[:HELIOS_MAX_POINTS], flip_x, flip_y, swap_xy)
-    n = len(a)
+def pack_helios_frame(frame: np.ndarray, pps: int, flip_x: bool = False, flip_y: bool = False, swap_xy: bool = False) -> bytes:
+    """Vectorized Helios bulk packet: 7 bytes/point (12-bit x,y packed, r,g,b,i) + 5-byte footer."""
+    pts = frame[:HELIOS_MAX_POINTS]
+    n = len(pts)
     if n >= 45 and (n - 45) % 64 == 0:   # firmware cannot receive transfers of these sizes
-        a, n = a[:-1], n - 1
-    x, y = a["x"].astype(np.uint16), a["y"].astype(np.uint16)
+        pts = pts[:-1]
+        n -= 1
+
+    x_f = pts[:, 1] if swap_xy else pts[:, 0]
+    y_f = pts[:, 0] if swap_xy else pts[:, 1]
+    if flip_x:
+        x_f = -x_f
+    if flip_y:
+        y_f = -y_f
+
+    x = np.clip((x_f + 1.0) * 2047.5, 0, 4095).astype(np.uint16)
+    y = np.clip((y_f + 1.0) * 2047.5, 0, 4095).astype(np.uint16)
+    rgb = np.clip(pts[:, 2:5] * 255.0, 0, 255).astype(np.uint8)
+
     b = np.empty((n, 7), np.uint8)
-    b[:, 0] = x >> 4
+    b[:, 0] = (x >> 4).astype(np.uint8)
     b[:, 1] = (((x & 0xF) << 4) | (y >> 8)).astype(np.uint8)
-    b[:, 2] = y & 0xFF
-    b[:, 3], b[:, 4], b[:, 5], b[:, 6] = a["r"], a["g"], a["b"], a["i"]
+    b[:, 2] = (y & 0xFF).astype(np.uint8)
+    b[:, 3:6] = rgb
+    b[:, 6] = 255
+
     pps = int(min(max(pps, 7), HELIOS_MAX_PPS))
     return b.tobytes() + bytes([pps & 0xFF, pps >> 8, n & 0xFF, n >> 8, 0])
 
 
+class _AsyncFrameSender:
+    """Latest-frame background sender so USB I/O never stalls frame generation or adds queue latency."""
+
+    def __init__(self, write_fn):
+        self._write_fn = write_fn
+        self._lock = threading.Lock()
+        self._event = threading.Event()
+        self._latest: np.ndarray | None = None
+        self._error: Exception | None = None
+        self._running = False
+        self._thread: threading.Thread | None = None
+
+    def start(self):
+        self._running = True
+        self._error = None
+        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._thread.start()
+
+    def submit(self, frame: np.ndarray):
+        if self._error is not None:
+            err, self._error = self._error, None
+            raise err
+        with self._lock:
+            self._latest = frame
+        self._event.set()
+
+    def _run(self):
+        while self._running:
+            if not self._event.wait(timeout=0.05):
+                continue
+            self._event.clear()
+            with self._lock:
+                frame = self._latest
+                self._latest = None
+            if frame is not None and self._running:
+                try:
+                    self._write_fn(frame)
+                except Exception as e:  # noqa: BLE001
+                    self._error = e
+                    self._running = False
+                    break
+
+    def stop(self):
+        self._running = False
+        self._event.set()
+        if self._thread is not None:
+            self._thread.join(timeout=0.3)
+            self._thread = None
+
+
 class HeliosUSB:
-    """Native Helios USB driver (pyusb + libusb). No vendor DLL needed."""
+    """Native Helios USB driver (pyusb + libusb) with async latest-frame dispatch."""
     VID, PID = 0x1209, 0xE500
     EP_BULK_OUT, EP_INT_OUT, EP_INT_IN = 0x02, 0x06, 0x83
     SDK_VERSION = 6
 
-    def __init__(self, index=0, pps=30000, flip_x=False, flip_y=False, swap_xy=False):
+    def __init__(self, index=0, pps=30000, flip_x=False, flip_y=False, swap_xy=False, async_io=True):
         self.index, self.pps = index, pps
         self.flip = dict(flip_x=flip_x, flip_y=flip_y, swap_xy=swap_xy)
         self.dev = None
+        self._async_io = async_io
+        self._sender: _AsyncFrameSender | None = None
 
     def open(self):
         try:
@@ -86,7 +181,7 @@ class HeliosUSB:
         self.dev = devs[self.index]
         try:
             self.dev.set_configuration()
-        except Exception:  # noqa: BLE001  (already configured / not supported on WinUSB)
+        except Exception:  # noqa: BLE001
             pass
         try:
             usb.util.claim_interface(self.dev, 0)
@@ -96,6 +191,9 @@ class HeliosUSB:
         self._ctl(0x04, read=True)                 # firmware version (also wakes the interface)
         self._ctl(0x07, self.SDK_VERSION)          # announce SDK version
         self._ctl(0x02, 1)                         # shutter open
+        if self._async_io:
+            self._sender = _AsyncFrameSender(self._write_sync)
+            self._sender.start()
         return 1
 
     def _ctl(self, cmd, arg=0, read=False):
@@ -108,22 +206,31 @@ class HeliosUSB:
         r = self._ctl(0x03, read=True)
         return len(r) >= 2 and r[0] == 0x83 and r[1] == 1
 
-    def send(self, frame, timeout=1.0):
+    def _write_sync(self, frame, timeout=1.0):
+        data = pack_helios_frame(frame, self.pps, **self.flip)
         t0 = time.perf_counter()
         while not self._ready():
             if time.perf_counter() - t0 > timeout:
                 raise RuntimeError("Helios not ready (timeout)")
-            time.sleep(0.0003)
-        data = pack_helios_frame(frame, self.pps, **self.flip)
+            time.sleep(0.0001)
         self.dev.write(self.EP_BULK_OUT, data, max((8 + len(data)) >> 5, 100))
 
+    def send(self, frame, timeout=1.0):
+        if self._sender is not None:
+            self._sender.submit(frame)
+        else:
+            self._write_sync(frame, timeout=timeout)
+
     def close(self):
+        if self._sender is not None:
+            self._sender.stop()
+            self._sender = None
         if self.dev is None:
             return
         try:
-            self.send(np.zeros((64, 5), np.float32), timeout=0.2)
-            self._ctl(0x02, 0)                      # shutter closed
-            self._ctl(0x01)                         # stop
+            self._write_sync(np.zeros((64, 5), np.float32), timeout=0.2)
+            self._ctl(0x02, 0)                     # shutter closed
+            self._ctl(0x01)                        # stop
         except Exception:  # noqa: BLE001
             pass
         try:
@@ -135,7 +242,7 @@ class HeliosUSB:
 
 
 class HeliosDAC:
-    def __init__(self, lib_path=None, device=0, pps=30000, flip_x=False, flip_y=False, swap_xy=False):
+    def __init__(self, lib_path=None, device=0, pps=30000, flip_x=False, flip_y=False, swap_xy=False, async_io=True):
         self.dev, self.pps = device, min(pps, HELIOS_MAX_PPS)
         self.flip = dict(flip_x=flip_x, flip_y=flip_y, swap_xy=swap_xy)
         self.lib = self._load(lib_path)
@@ -149,6 +256,8 @@ class HeliosDAC:
                                  ctypes.POINTER(HeliosPoint), ctypes.c_uint]
         L.WriteFrame.restype = ctypes.c_int
         self.opened = False
+        self._async_io = async_io
+        self._sender: _AsyncFrameSender | None = None
 
     @staticmethod
     def _load(path):
@@ -172,11 +281,14 @@ class HeliosDAC:
             raise RuntimeError(f"No Helios DAC found (OpenDevices returned {n}). On Linux you need udev rules or root.")
         self.opened = True
         self.lib.SetShutter(self.dev, True)
+        if self._async_io:
+            self._sender = _AsyncFrameSender(self._write_sync)
+            self._sender.start()
         return n
 
-    def send(self, frame, timeout=1.0):
-        """Blocks until the DAC has finished the previous frame, then queues this one."""
+    def _write_sync(self, frame, timeout=1.0):
         pts = to_helios_array(frame[:HELIOS_MAX_POINTS], **self.flip)
+        buf = (HeliosPoint * len(pts)).from_buffer_copy(pts.tobytes())
         t0 = time.perf_counter()
         while True:
             st = self.lib.GetStatus(self.dev)
@@ -186,20 +298,29 @@ class HeliosDAC:
                 raise RuntimeError(f"Helios GetStatus error {st}")
             if time.perf_counter() - t0 > timeout:
                 raise RuntimeError("Helios not ready (timeout)")
-            time.sleep(0.0003)
-        buf = (HeliosPoint * len(pts)).from_buffer_copy(pts.tobytes())
+            time.sleep(0.0001)
         r = self.lib.WriteFrame(self.dev, self.pps, 0, buf, len(pts))
         if r < 0:
             raise RuntimeError(f"Helios WriteFrame error {r}")
 
+    def send(self, frame, timeout=1.0):
+        """Queues the latest frame without blocking the generator thread."""
+        if self._sender is not None:
+            self._sender.submit(frame)
+        else:
+            self._write_sync(frame, timeout=timeout)
+
     def blank(self):
         try:
             if self.lib.GetStatus(self.dev) == 1:
-                self.send(np.zeros((64, 5), np.float32), timeout=0.2)
+                self._write_sync(np.zeros((64, 5), np.float32), timeout=0.2)
         except Exception:  # noqa: BLE001
             pass
 
     def close(self):
+        if self._sender is not None:
+            self._sender.stop()
+            self._sender = None
         if self.opened:
             self.blank()
             self.lib.SetShutter(self.dev, False)
@@ -219,7 +340,7 @@ class NullOutput:
         self._next += len(frame) / self.pps
         d = self._next - time.perf_counter()
         if d > 0:
-            time.sleep(d)
+            _precise_sleep(d)
         else:
             self._next = time.perf_counter()
 
@@ -248,7 +369,13 @@ def _style(ax):
 
 
 class SimDisplay(NullOutput):
-    """Live matplotlib preview, paced like the real DAC."""
+    """High-FPS blitted matplotlib preview, paced like the real DAC."""
+
+    def __init__(self, pps=30000, target_ui_fps=120.0):
+        super().__init__(pps=pps)
+        self._ui_interval = 1.0 / max(target_ui_fps, 1.0)
+        self._last_ui_draw = 0.0
+        self._bg = None
 
     def open(self):
         import matplotlib.pyplot as plt
@@ -258,11 +385,25 @@ class SimDisplay(NullOutput):
         self.fig.patch.set_facecolor("black")
         _style(self.ax)
         self.lc = draw_frame(self.ax, np.zeros((3, 5)))
+        self.lc.set_animated(True)
+        self.fig.canvas.draw()
+        self._bg = self.fig.canvas.copy_from_bbox(self.ax.bbox)
+        self._last_ui_draw = time.perf_counter()
         super().open()
 
     def send(self, frame):
-        draw_frame(self.ax, frame, self.lc)
-        self.plt.pause(0.001)
+        now = time.perf_counter()
+        if now - self._last_ui_draw >= self._ui_interval:
+            self._last_ui_draw = now
+            canvas = self.fig.canvas
+            if self._bg is None:
+                canvas.draw()
+                self._bg = canvas.copy_from_bbox(self.ax.bbox)
+            canvas.restore_region(self._bg)
+            draw_frame(self.ax, frame, self.lc)
+            self.ax.draw_artist(self.lc)
+            canvas.blit(self.ax.bbox)
+            canvas.flush_events()
         super().send(frame)
 
     def close(self):
