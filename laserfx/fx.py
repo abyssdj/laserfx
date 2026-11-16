@@ -1,9 +1,11 @@
-"""Laser effects: pure modern aerial beam choreography (no 90s shapes, tunnels, or concentric rings).
+"""Laser effects: audio-triggered ballistic beam sweeps, transient bursts, and twin-projector chaos.
 
 Coordinates are in [-1, 1]; colours are RGB in 0..1.
 Designed for a single output feeding twin projectors where Projector 2 is X-mirrored (x -> -x):
 - Off-axis origins and asymmetric tilts ensure Unit A and X-mirrored Unit B slice across each other
   in mid-air rather than overlapping onto identical beam paths.
+- Stateful transient detectors extract kick edges, snare hits, and hi-hat energy directly from
+  `Features` to trigger one-shot sweeps, polarity flips, and beam fractures.
 """
 from __future__ import annotations
 
@@ -33,16 +35,18 @@ def line(a, b, rgb, dwell=2):
     return Path(np.array([a, b], float), rgb, dwell)
 
 
-def dashed_beam(a, b, rgb, segments=4, duty=0.55):
-    """Chops a beam into high-contrast aerial pulses (grating / segmented beam look)."""
+def dashed_beam(a, b, rgb, segments=4, duty=0.55, phase=0.0):
+    """Chops a beam into travelling high-contrast aerial packets."""
     a = np.asarray(a, dtype=float)
     b = np.asarray(b, dtype=float)
     out = []
     for i in range(segments):
-        t0 = i / segments
-        t1 = t0 + duty / segments
+        t0 = ((i + phase) % segments) / segments
+        t1 = min(t0 + duty / segments, 1.0)
+        if t1 <= t0 + 0.02:
+            continue
         p0 = a + (b - a) * t0
-        p1 = a + (b - a) * min(t1, 1.0)
+        p1 = a + (b - a) * t1
         if i % 2 == 1:
             p0, p1 = p1, p0
         out.append(line(p0, p1, rgb, dwell=1))
@@ -61,25 +65,6 @@ def ray(ox, oy, ang, length=2.6):
     elif dy < -1e-9:
         t = min(t, (-1.0 - oy) / dy)
     return (ox, oy), (ox + dx * t, oy + dy * t)
-
-
-# ---------------------------------------------------------------- snappy modern motion curves
-def whip(bt: float, div: float = 1.0, speed: float = 11.0) -> float:
-    """Fast galvo whip: slams to the next beat target in the first ~20% of the beat, then locks."""
-    x = bt * div
-    idx = math.floor(x)
-    frac = x - idx
-    return idx + (1.0 - math.exp(-speed * frac))
-
-
-def saw(bt: float, beats: float = 2.0) -> float:
-    """Linear 0->1 sawtooth ramp with instant flyback reset (no slow back-and-forth pendulum)."""
-    return (bt / beats) % 1.0
-
-
-def kick_env(c: Ctx) -> float:
-    """Tight transient punch from kick/beat pulse."""
-    return min(max(max(c.kick, c.pulse * 0.8) ** 1.3, 0.0), 1.0)
 
 
 def gate(c: Ctx, div: float = 2.0, duty: float = 0.5) -> bool:
@@ -109,6 +94,14 @@ class Ctx:
     rt: float = 0.0
     strobe: bool = True
     detail: float = 0.5
+    # Audio-derived event states (populated by FXEngine)
+    kick_age: float = 1.0      # beats elapsed since last detected kick transient (0.0 = just fired!)
+    kick_count: int = 0        # total kick transients fired (drives deterministic/chaotic state flips)
+    snare_age: float = 1.0     # beats elapsed since last mid/high transient spike
+    snare_count: int = 0
+    hi_energy: float = 0.0     # 0..1 instantaneous high-frequency energy (hats, cymbals, synth fizz)
+    sweep_from: float = -0.3   # ballistic whip start angle (rad)
+    sweep_to: float = 0.6      # ballistic whip target angle (rad)
 
     @property
     def energy(self):
@@ -122,6 +115,14 @@ class Ctx:
     def kick(self):
         return self.f.kick
 
+    def whip_progress(self, speed: float = 11.0) -> float:
+        """0.0 -> 1.0 ballistic curve driven by actual time since the last kick transient."""
+        return 1.0 - math.exp(-speed * max(self.kick_age, 0.0))
+
+    def snare_punch(self, decay: float = 8.0) -> float:
+        """1.0 -> 0.0 sharp burst triggered by snare/clap transients."""
+        return math.exp(-decay * max(self.snare_age, 0.0))
+
     def count(self, lo, hi, x=1.0):
         return int(round(lo + (hi - lo) * min(max(self.detail * x, 0.0), 1.0)))
 
@@ -133,137 +134,200 @@ class Ctx:
         return hsv(h_acc, max(s_acc - white_boost, 0.0), v)
 
 
-# ------------------------------------------------------------------------ MODERN BEAM SCENES
+# ------------------------------------------------------------------------ AUDIO-DRIVEN CHAOS SCENES
 
-def sc_whip_fan(c: Ctx):
-    """Fast on-beat beam whip: slams across the venue on every beat, locking into sharp angles."""
-    k = kick_env(c)
+def sc_ballistic_whip(c: Ctx):
+    """Every kick fires a real one-shot ballistic whip across the room; hi-hats fracture the beams."""
+    prog = c.whip_progress(speed=10.5)
+    punch = 1.0 - prog
+    snare = c.snare_punch(9.0)
+
     n = c.count(5, 9, max(c.energy, 0.45))
-    # Every beat whips rapidly to a contrasting angle
-    step = whip(c.bt, div=1.0, speed=12.0)
-    beat_idx = int(c.bt)
-    targets = [-0.28, 0.62, -0.05, 0.78, -0.35, 0.55, 0.15, 0.85]
-    a_prev = targets[(beat_idx - 1) % len(targets)]
-    a_curr = targets[beat_idx % len(targets)]
-    frac = step - math.floor(step)
-    aim = a_prev + (a_curr - a_prev) * frac
+    aim = c.sweep_from + (c.sweep_to - c.sweep_from) * prog
+    # Fan explodes wide right as the kick hits, then tightens into a razor blade
+    spread = 0.12 + 0.52 * punch + 0.25 * snare
+    # Flip origin between left-floor and left-ceiling on snares!
+    oy = 0.96 if (c.snare_count % 2 == 1 and snare > 0.25) else -0.96
+    ox = -0.62 if oy < 0 else -0.42
+    base_dir = math.pi - aim if oy > 0 else aim
 
-    # Fan opens wide on the kick transient, snaps tight between kicks
-    spread = 0.14 + 0.44 * k
-    ox = -0.62
-
-    out = []
-    for i in range(n):
-        u = (i / max(n - 1, 1)) - 0.5
-        ang = aim + u * 2.0 * spread
-        p0, p1 = ray(ox, -0.96, ang, 2.5)
-        is_lead = (i == 0 or i == n - 1)
-        col = c.palette(1 if is_lead else (i % 2), v=1.0, white_boost=0.8 * k if is_lead else 0.0)
-        out.append(line(*_zig(i, p0, p1), col, dwell=2))
-    return out
-
-
-def sc_saw_sweep(c: Ctx):
-    """Relentless 2-beat sawtooth sweep: slashes rapidly left-to-right, blanks, and snaps back."""
-    k = kick_env(c)
-    n = c.count(4, 8, max(c.energy, 0.4))
-    ramp = saw(c.bt, beats=2.0)
-    # Rapid unidirectional sweep from far-left (-0.45 rad) to far-right (+0.85 rad)
-    aim = -0.45 + 1.30 * (ramp ** 0.75)
-    spread = 0.22 + 0.25 * k
-    ox = -0.58
-
-    out = []
-    for i in range(n):
-        u = (i / max(n - 1, 1)) - 0.5
-        ang = aim + u * 2.0 * spread
-        p0, p1 = ray(ox, -0.96, ang, 2.5)
-        col = c.palette(i % 2, v=1.0, white_boost=0.6 * k if i == n - 1 else 0.0)
-        out.append(line(*_zig(i, p0, p1), col, dwell=2))
-    return out
-
-
-def sc_beam_chase(c: Ctx):
-    """16th-note sequential beam chase: steps rapidly through discrete beam positions across the room."""
-    n_slots = c.count(6, 10, max(c.energy, 0.5))
-    # 4 steps per beat (16th notes)
-    step_16th = int(c.bt * 4)
-    # Light up a tight cluster of 2–3 adjacent beams chasing back and forth
-    cycle = 2 * n_slots - 2
-    pos = step_16th % max(cycle, 1)
-    if pos >= n_slots:
-        pos = cycle - pos
-
-    ox = -0.60
     out = []
     idx = 0
-    for offset in range(-1, 2):
-        slot = pos + offset
-        if 0 <= slot < n_slots:
-            u = (slot / max(n_slots - 1, 1)) - 0.5
-            ang = 0.28 + u * 1.15
-            p0, p1 = ray(ox, -0.96, ang, 2.5)
-            is_head = (offset == 0)
-            col = c.palette(0 if is_head else 1, v=1.0 if is_head else 0.55, white_boost=0.85 if is_head else 0.0)
-            out.append(line(*_zig(idx, p0, p1), col, dwell=3 if is_head else 1))
+    for i in range(n):
+        u = (i / max(n - 1, 1)) - 0.5
+        ang = base_dir + u * 2.0 * spread
+        p0, p1 = ray(ox, oy, ang, 2.5)
+        is_edge = (i == 0 or i == n - 1)
+        col = c.palette(1 if is_edge else (i % 2), v=1.0, white_boost=0.85 * punch if is_edge else 0.35 * snare)
+
+        # High-frequency energy (hats/cymbals) shatters outer beams into flying light packets
+        if c.hi_energy > 0.45 and (i % 2 == 1):
+            for seg in dashed_beam(p0, p1, col, segments=4, duty=0.5, phase=c.bt * 6.0):
+                out.append(seg)
+                idx += 1
+        else:
+            out.append(line(*_zig(idx, p0, p1), col, dwell=2))
             idx += 1
     return out
 
 
-def sc_scissor_cross(c: Ctx):
-    """Fast opposing dual-beam curtains that scissor violently across each other on every beat."""
-    k = kick_env(c)
-    n = c.count(3, 6, max(c.energy, 0.45))
-    w = whip(c.bt, div=1.0, speed=10.0)
-    beat_idx = int(c.bt)
-    direction = 1.0 if beat_idx % 2 == 0 else -1.0
-    frac = w - math.floor(w)
-    swing = direction * (-0.35 + 0.70 * frac)
+def sc_chaos_storm(c: Ctx):
+    """Full-tilt drop chaos: kick-triggered angle slams, snare ceiling-drops, and hi-hat strobe bursts."""
+    if not gate(c, 4, 0.65):
+        return []
+    prog = c.whip_progress(speed=13.0)
+    punch = 1.0 - prog
+    snare = c.snare_punch(10.0)
+
+    # Choose chaotic mode dynamically from kick_count & snare hits
+    mode = (c.kick_count + c.snare_count) % 3
+    out = []
+    idx = 0
+
+    if mode == 0:
+        # Twin intersecting floor + ceiling whips firing simultaneously
+        n = c.count(4, 7)
+        aim1 = c.sweep_from + (c.sweep_to - c.sweep_from) * prog
+        aim2 = math.pi - (0.75 - 0.95 * prog)
+        for i in range(n):
+            u = (i / max(n - 1, 1)) - 0.5
+            p0, p1 = ray(-0.75, -0.96, aim1 + u * (0.35 + 0.3 * punch), 2.5)
+            out.append(line(*_zig(idx, p0, p1), c.palette(0, white_boost=0.8 * punch), dwell=2))
+            idx += 1
+        for i in range(max(3, n - 1)):
+            u = (i / max(n - 2, 1)) - 0.5
+            p0, p1 = ray(-0.28, 0.96, aim2 + u * (0.30 + 0.25 * snare), 2.5)
+            out.append(line(*_zig(idx, p0, p1), c.palette(1, white_boost=0.8 * snare), dwell=2))
+            idx += 1
+
+    elif mode == 1:
+        # Violent horizontal + diagonal blade slashes driven by kick & snare positions
+        planes = c.count(3, 6)
+        tilt = (0.75 * punch - 0.35) * (1.0 if c.kick_count % 2 == 0 else -1.0)
+        y_sweep = -0.65 + 1.30 * prog
+        for p in range(planes):
+            off = (p - (planes - 1) / 2.0) * (0.16 + 0.18 * snare)
+            y0 = float(np.clip(y_sweep + off - tilt, -0.95, 0.95))
+            y1 = float(np.clip(y_sweep + off + tilt, -0.95, 0.95))
+            col = c.palette(p % 2, white_boost=0.9 if (p == 0 and punch > 0.4) else 0.0)
+            if c.hi_energy > 0.4:
+                for seg in dashed_beam((-0.96, y0), (0.96, y1), col, segments=5, duty=0.55, phase=c.bt * 8.0):
+                    out.append(seg)
+            else:
+                out.append(line(*_zig(idx, (-0.96, y0), (0.96, y1)), col, dwell=2))
+                idx += 1
+
+    else:
+        # Rapid-fire 16th-note staccato angle bursts + vertical laser wall on snares
+        step = int(c.bt * 4)
+        angles = [-0.32, 0.68, 0.05, 0.85, -0.18, 0.52, 0.25, 0.92]
+        aim = angles[(step + c.kick_count) % len(angles)]
+        n = c.count(4, 7)
+        for i in range(n):
+            u = (i / max(n - 1, 1)) - 0.5
+            p0, p1 = ray(-0.60, -0.96, aim + u * (0.22 + 0.38 * punch), 2.5)
+            out.append(line(*_zig(idx, p0, p1), c.palette(step % 2, white_boost=0.85 if punch > 0.5 else 0.0), dwell=2))
+            idx += 1
+        if snare > 0.2:
+            x_wall = -0.85 + 0.65 * (1.0 - snare)
+            out.append(line((x_wall, -0.95), (x_wall, 0.95), hsv(0.0, 0.0, 1.0), dwell=3))
+    return out
+
+
+def sc_hat_shatter(c: Ctx):
+    """High-frequency reactive beam array: solid beams explode into travelling light bullets on hats/synths."""
+    prog = c.whip_progress(speed=9.0)
+    punch = 1.0 - prog
+    n = c.count(5, 9, max(c.energy, 0.4))
+    aim = c.sweep_from + (c.sweep_to - c.sweep_from) * prog
+    spread = 0.32 + 0.35 * c.hi_energy
+    segs = max(2, int(2 + 5 * c.hi_energy))
 
     out = []
     idx = 0
-    # Curtain 1: fires from far-left floor aiming right
     for i in range(n):
         u = (i / max(n - 1, 1)) - 0.5
-        ang = 0.42 + swing + u * (0.28 + 0.22 * k)
-        p0, p1 = ray(-0.88, -0.96, ang, 2.6)
-        out.append(line(*_zig(idx, p0, p1), c.palette(0, v=1.0, white_boost=0.5 * k if i == 0 else 0.0), dwell=1))
+        ang = aim + u * 2.0 * spread
+        p0, p1 = ray(-0.58, -0.96, ang, 2.5)
+        col = c.palette(i % 2, v=1.0, white_boost=0.7 * c.hi_energy if i % 2 == 0 else 0.0)
+        if c.hi_energy > 0.25:
+            for seg in dashed_beam(p0, p1, col, segments=segs, duty=0.48, phase=c.bt * 7.0 + i * 0.3):
+                out.append(seg)
+                idx += 1
+        else:
+            out.append(line(*_zig(idx, p0, p1), col, dwell=2))
+            idx += 1
+    return out
+
+
+def sc_snare_scissors(c: Ctx):
+    """Kick sweeps floor curtain; Snare slams an opposing ceiling curtain violently downward."""
+    k_prog = c.whip_progress(speed=11.0)
+    s_prog = 1.0 - c.snare_punch(9.0)
+    n = c.count(4, 7, max(c.energy, 0.45))
+
+    out = []
+    idx = 0
+    # Floor curtain driven by kick transient
+    aim_floor = c.sweep_from + (c.sweep_to - c.sweep_from) * k_prog
+    for i in range(n):
+        u = (i / max(n - 1, 1)) - 0.5
+        p0, p1 = ray(-0.82, -0.96, aim_floor + u * 0.36, 2.6)
+        out.append(line(*_zig(idx, p0, p1), c.palette(0, white_boost=0.6 * (1.0 - k_prog)), dwell=1))
         idx += 1
 
-    # Curtain 2: fires from mid-left ceiling aiming down-right (mirrored unit fires from mid-right ceiling)
-    for i in range(max(2, n - 1)):
+    # Ceiling curtain driven independently by snare transient
+    aim_ceil = math.pi - (-0.25 + 1.05 * s_prog)
+    for i in range(max(3, n - 1)):
         u = (i / max(n - 2, 1)) - 0.5
-        ang = math.pi - (0.38 - swing * 0.8 + u * 0.25)
-        p0, p1 = ray(-0.35, 0.96, ang, 2.6)
-        out.append(line(*_zig(idx, p0, p1), c.palette(1, v=0.95), dwell=1))
+        p0, p1 = ray(-0.22, 0.96, aim_ceil + u * 0.32, 2.6)
+        out.append(line(*_zig(idx, p0, p1), c.palette(1, white_boost=0.85 * (1.0 - s_prog)), dwell=1))
         idx += 1
     return out
 
 
-def sc_liquid_sky(c: Ctx):
-    """Razor-sharp aerial sheet that whips tilt angle on beats and slices vertically through haze."""
-    k = kick_env(c)
-    planes = c.count(2, 4, max(c.energy, 0.35))
-    beat_idx = int(c.bt)
-    w = whip(c.bt, div=0.5, speed=9.0)
-    frac = w - math.floor(w)
+def sc_vertical_slam(c: Ctx):
+    """Vertical laser columns that slam horizontally across the room on every kick & snare hit."""
+    prog = c.whip_progress(speed=12.0)
+    punch = 1.0 - prog
+    snare = c.snare_punch(8.0)
+    n = c.count(4, 8, max(c.energy, 0.45))
 
-    # Slanted sheet angle flips sharply every 2 beats (creates giant X-planes with mirrored projector)
-    sgn = 1.0 if (beat_idx // 2) % 2 == 0 else -1.0
-    tilt = sgn * (-0.35 + 0.82 * frac)
-    y_base = 0.32 * math.sin(c.bt * TAU / 16)
+    # Map sweep_from/to into X coordinates [-0.90, -0.12] (mirrored unit covers [+0.12, +0.90])
+    x0 = -0.50 + 0.38 * math.sin(c.sweep_from * 2.0)
+    x1 = -0.50 + 0.38 * math.sin(c.sweep_to * 2.0)
+    x_center = x0 + (x1 - x0) * prog
+    width = 0.14 + 0.34 * punch + 0.22 * snare
+
+    out = []
+    for i in range(n):
+        u = (i / max(n - 1, 1)) - 0.5
+        x = float(np.clip(x_center + u * width, -0.96, 0.96))
+        col = c.palette(i % 2, v=1.0, white_boost=0.8 * punch if i == n // 2 else 0.0)
+        out.append(line(*_zig(i, (x, -0.95), (x, 0.95)), col, dwell=2))
+    return out
+
+
+def sc_liquid_sky(c: Ctx):
+    """Dynamic aerial sheet: tilts sharply on kicks, ripples with audio energy, and fractures on hi-hats."""
+    prog = c.whip_progress(speed=9.5)
+    punch = 1.0 - prog
+    snare = c.snare_punch(8.0)
+    planes = c.count(2, 4, max(c.energy, 0.35))
+
+    sgn = 1.0 if c.kick_count % 2 == 0 else -1.0
+    tilt = sgn * (-0.35 + 0.85 * prog)
+    y_base = 0.35 * math.sin(c.bt * TAU / 12) + 0.22 * snare * (-sgn)
 
     out = []
     idx = 0
     for p in range(planes):
-        gap = (p - (planes - 1) / 2.0) * (0.14 + 0.22 * k)
+        gap = (p - (planes - 1) / 2.0) * (0.12 + 0.26 * punch)
         y0 = float(np.clip(y_base + gap - tilt, -0.94, 0.94))
         y1 = float(np.clip(y_base + gap + tilt, -0.94, 0.94))
-        col = c.palette(p, v=0.9 + 0.1 * k, white_boost=0.55 * k if p == 0 else 0.0)
-
-        # Every 2nd bar, chop the liquid sky into fast-moving dashed light pulses
-        if (beat_idx // 4) % 2 == 1:
-            for seg in dashed_beam((-0.96, y0), (0.96, y1), col, segments=c.count(3, 6), duty=0.55):
+        col = c.palette(p, v=1.0, white_boost=0.7 * punch if p == 0 else 0.0)
+        if c.hi_energy > 0.38:
+            for seg in dashed_beam((-0.96, y0), (0.96, y1), col, segments=c.count(3, 6), duty=0.55, phase=c.bt * 5.0):
                 out.append(seg)
         else:
             out.append(line(*_zig(idx, (-0.96, y0), (0.96, y1)), col, dwell=2))
@@ -272,52 +336,29 @@ def sc_liquid_sky(c: Ctx):
 
 
 def sc_sky_sweep(c: Ctx):
-    """Smooth, wide atmospheric breakdown sweeps: asymmetric floor-to-ceiling beam curtains."""
-    v = 0.70 + 0.25 * math.sin(c.bt * TAU / 16)
+    """Atmospheric breakdown canopy that still reacts dynamically to subtle percussion & synth swells."""
+    v = 0.65 + 0.35 * c.energy
     n = c.count(5, 9)
-    # Slow sweeping fan from left-floor across the center (mirrored unit sweeps from right-floor)
-    aim = 0.25 + 0.38 * math.sin(c.bt * TAU / 24)
-    spread = 0.45 + 0.18 * math.sin(c.bt * TAU / 16)
+    aim = 0.25 + 0.38 * math.sin(c.bt * TAU / 20) + 0.15 * c.snare_punch(5.0)
+    spread = 0.42 + 0.24 * c.energy
     out = []
     for i in range(n):
         u = (i / max(n - 1, 1)) - 0.5
         ang = aim + u * 2.0 * spread
         p0, p1 = ray(-0.65, -0.96, ang, 2.5)
-        out.append(line(*_zig(i, p0, p1), c.palette(i % 2, v=v), dwell=1))
-    return out
-
-
-def sc_vertical_pillars(c: Ctx):
-    """High-impact vertical beam columns that whip horizontally across the stage on every beat."""
-    k = kick_env(c)
-    n = c.count(4, 7, max(c.energy, 0.45))
-    w = whip(c.bt, div=1.0, speed=11.0)
-    beat_idx = int(c.bt)
-    frac = w - math.floor(w)
-
-    # Whip beam cluster between left-edge and center-left on alternating beats
-    x_start = -0.88 if beat_idx % 2 == 0 else -0.25
-    x_end = -0.25 if beat_idx % 2 == 0 else -0.88
-    x_center = x_start + (x_end - x_start) * frac
-    width = 0.22 + 0.26 * k
-
-    out = []
-    for i in range(n):
-        u = (i / max(n - 1, 1)) - 0.5
-        x = float(np.clip(x_center + u * width, -0.96, 0.96))
-        col = c.palette(i % 2, v=1.0, white_boost=0.75 * k if i == n // 2 else 0.0)
-        out.append(line(*_zig(i, (x, -0.95), (x, 0.95)), col, dwell=2))
+        col = c.palette(i % 2, v=v, white_boost=0.45 * c.hi_energy if i == n // 2 else 0.0)
+        out.append(line(*_zig(i, p0, p1), col, dwell=1))
     return out
 
 
 def sc_build_accelerate(c: Ctx):
-    """Accelerating build-up whip: sweeps faster and faster, compressing into a tight laser blade at the drop."""
+    """Accelerating build-up whip: sweeps faster with build tension and flickers wildly on snare rolls."""
     b = c.f.build
+    snare = c.snare_punch(12.0)
     n = c.count(5, 11, max(b, 0.4))
-    # Accelerates continuously via c.rt and narrows spread into a hyper-intense beam right before drop
-    sweep = (0.55 * (1.0 - 0.65 * (b ** 2))) * math.sin(c.rt * TAU / 2.5)
+    sweep = (0.58 * (1.0 - 0.65 * (b ** 2))) * math.sin(c.rt * TAU / 2.2)
     bias = 0.35 * (1.0 - 0.7 * b)
-    spread = 0.52 * (1.0 - 0.78 * (b ** 2)) + 0.04
+    spread = 0.52 * (1.0 - 0.78 * (b ** 2)) + 0.04 + 0.18 * snare
     ox = -0.60 * (1.0 - 0.65 * b)
 
     out = []
@@ -325,116 +366,65 @@ def sc_build_accelerate(c: Ctx):
         u = (i / max(n - 1, 1)) - 0.5
         ang = bias + sweep + u * 2.0 * spread
         p0, p1 = ray(ox, -0.96, ang, 2.5)
-        col = c.palette(i % 2, v=0.75 + 0.25 * b, white_boost=0.85 * (b ** 2))
+        col = c.palette(i % 2, v=0.75 + 0.25 * b, white_boost=min(1.0, 0.85 * (b ** 2) + 0.5 * snare))
         out.append(line(*_zig(i, p0, p1), col, dwell=2))
     return out
 
 
-def sc_drop_strobe_whip(c: Ctx):
-    """Hard drop cue: 8th-note gated beam whips alternating between tilted slashes, vertical walls, and fans."""
-    if not gate(c, 2, 0.5):
-        return []
-    k = kick_env(c)
-    beat_mod = int(c.bt) % 4
-    w = whip(c.bt, div=2.0, speed=13.0)
-    frac = w - math.floor(w)
-    out = []
-
-    if beat_mod == 0:
-        # Rapidly whipping steep diagonal blade sheet
-        tilt = -0.55 + 1.15 * frac
-        for i, y in enumerate(np.linspace(-0.55, 0.55, c.count(3, 5))):
-            out.append(line(*_zig(i, (-0.95, y - tilt), (0.95, y + tilt)), c.palette(i, white_boost=0.7 if i == 1 else 0.0), dwell=2))
-    elif beat_mod == 1:
-        # Tight whipping fan from left corner
-        n = c.count(5, 8)
-        aim = 0.15 + 0.65 * frac
-        for i in range(n):
-            u = (i / max(n - 1, 1)) - 0.5
-            p0, p1 = ray(-0.82, -0.96, aim + u * (0.35 + 0.25 * k), 2.5)
-            out.append(line(*_zig(i, p0, p1), c.palette(i % 2, white_boost=0.6 * k), dwell=2))
-    elif beat_mod == 2:
-        # Whipping vertical beam wall
-        x_base = -0.85 + 0.65 * frac
-        for i, dx in enumerate(np.linspace(-0.22, 0.22, c.count(4, 6))):
-            x = float(np.clip(x_base + dx, -0.96, 0.96))
-            out.append(line(*_zig(i, (x, -0.95), (x, 0.95)), c.palette(i % 2, white_boost=0.65 if i == 0 else 0.0), dwell=2))
-    else:
-        # Overhead ceiling-to-floor scissor slash
-        n = c.count(4, 7)
-        aim = math.pi - (0.15 + 0.65 * frac)
-        for i in range(n):
-            u = (i / max(n - 1, 1)) - 0.5
-            p0, p1 = ray(-0.25, 0.96, aim + u * 0.42, 2.5)
-            out.append(line(*_zig(i, p0, p1), c.palette(i % 2, white_boost=0.75 * k), dwell=2))
-    return out
-
-
-def sc_drop_machinegun(c: Ctx):
-    """16th-note staccato beam stabs firing across alternating angles on drop energy."""
-    if not gate(c, 4, 0.55):
-        return []
-    step = int(c.bt * 4)
-    angles = [-0.25, 0.45, 0.05, 0.72, -0.10, 0.58, 0.22, 0.85]
-    aim = angles[step % len(angles)]
-    n = c.count(3, 5)
-    out = []
-    for i in range(n):
-        u = (i / max(n - 1, 1)) - 0.5
-        p0, p1 = ray(-0.60, -0.96, aim + u * 0.24, 2.5)
-        out.append(line(*_zig(i, p0, p1), c.palette(step % 2, white_boost=0.8 if (step % 4 == 0) else 0.0), dwell=3))
-    return out
-
-
 SCENES = {
-    # Pure modern beam scenes
-    "whip_fan": sc_whip_fan,
-    "saw_sweep": sc_saw_sweep,
-    "beam_chase": sc_beam_chase,
-    "scissor_cross": sc_scissor_cross,
+    # Audio-triggered modern chaos & beam scenes
+    "ballistic_whip": sc_ballistic_whip,
+    "chaos_storm": sc_chaos_storm,
+    "hat_shatter": sc_hat_shatter,
+    "snare_scissors": sc_snare_scissors,
+    "vertical_slam": sc_vertical_slam,
     "liquid_sky": sc_liquid_sky,
     "sky_sweep": sc_sky_sweep,
-    "vertical_pillars": sc_vertical_pillars,
     "build_accelerate": sc_build_accelerate,
-    "drop_strobe_whip": sc_drop_strobe_whip,
-    "drop_machinegun": sc_drop_machinegun,
-    # Legacy aliases mapped strictly to modern beam sweeps (zero shapes)
-    "tunnel": sc_saw_sweep,
-    "tunnel_fast": sc_drop_strobe_whip,
-    "beam_fan": sc_whip_fan,
-    "starburst": sc_beam_chase,
-    "starburst_fast": sc_drop_machinegun,
-    "lissajous": sc_scissor_cross,
+    # Aliases so CLI / saved sessions remain compatible
+    "whip_fan": sc_ballistic_whip,
+    "saw_sweep": sc_ballistic_whip,
+    "beam_chase": sc_hat_shatter,
+    "scissor_cross": sc_snare_scissors,
+    "vertical_pillars": sc_vertical_slam,
+    "drop_strobe_whip": sc_chaos_storm,
+    "drop_machinegun": sc_chaos_storm,
+    "tunnel": sc_ballistic_whip,
+    "tunnel_fast": sc_chaos_storm,
+    "beam_fan": sc_ballistic_whip,
+    "starburst": sc_hat_shatter,
+    "starburst_fast": sc_chaos_storm,
+    "lissajous": sc_snare_scissors,
     "scope": sc_liquid_sky,
-    "spiral": sc_saw_sweep,
+    "spiral": sc_ballistic_whip,
     "spiral_slow": sc_sky_sweep,
-    "grid": sc_vertical_pillars,
-    "drop_blast": sc_drop_strobe_whip,
+    "grid": sc_vertical_slam,
+    "drop_blast": sc_chaos_storm,
     "breath": sc_sky_sweep,
     "riser": sc_build_accelerate,
-    "ring_pulse": sc_vertical_pillars,
+    "ring_pulse": sc_vertical_slam,
     "sky_fan": sc_sky_sweep,
-    "sky_cross": sc_scissor_cross,
+    "sky_cross": sc_snare_scissors,
     "scan_sweep": sc_liquid_sky,
     "build_fan": sc_build_accelerate,
     "build_scan": sc_build_accelerate,
-    "strobe_poly": sc_drop_strobe_whip,
-    "strobe_beams": sc_drop_strobe_whip,
-    "strobe_burst": sc_drop_machinegun,
+    "strobe_poly": sc_chaos_storm,
+    "strobe_beams": sc_chaos_storm,
+    "strobe_burst": sc_chaos_storm,
 }
 
 POOLS = {
-    MAIN: ["whip_fan", "saw_sweep", "beam_chase", "scissor_cross", "liquid_sky", "vertical_pillars"],
-    DROP: ["drop_strobe_whip", "drop_machinegun", "whip_fan", "scissor_cross", "vertical_pillars"],
-    BREAKDOWN: ["liquid_sky", "sky_sweep", "scissor_cross"],
-    BUILD: ["build_accelerate", "beam_chase", "liquid_sky"],
+    MAIN: ["ballistic_whip", "snare_scissors", "hat_shatter", "vertical_slam", "liquid_sky"],
+    DROP: ["chaos_storm", "ballistic_whip", "snare_scissors", "hat_shatter", "vertical_slam"],
+    BREAKDOWN: ["liquid_sky", "sky_sweep", "hat_shatter"],
+    BUILD: ["build_accelerate", "hat_shatter", "liquid_sky"],
     SILENCE: [],
 }
 BARS_PER_SCENE = {MAIN: 2, DROP: 1, BREAKDOWN: 4, BUILD: 2, SILENCE: 99}
 
 
 class FXEngine:
-    """Picks beam cues by section, switches on bar lines, drives high-contrast festival palettes."""
+    """Tracks real-time audio transients (kicks, snares, hi-hats) to fire ballistic beam sweeps & chaos."""
 
     def __init__(self, seed=1, force_scene=None):
         self.rng = np.random.default_rng(seed)
@@ -442,6 +432,18 @@ class FXEngine:
         self.section, self.scene = None, None
         self.hue, self.bars, self._last_beat = 0.0, 0, 0
         self.rt, self._last_bt, self.strobe_enabled, self.detail = 0.0, 0.0, True, 0.5
+
+        # Stateful transient & ballistic sweep trackers
+        self._prev_kick = 0.0
+        self._prev_hi = 0.0
+        self._hi_avg = 0.05
+        self.kick_age = 1.0
+        self.kick_count = 0
+        self.snare_age = 1.0
+        self.snare_count = 0
+        self.hi_energy = 0.0
+        self.sweep_from = -0.35
+        self.sweep_to = 0.65
 
     def _pick(self):
         pool = list(POOLS.get(self.section, []))
@@ -453,10 +455,50 @@ class FXEngine:
         else:
             self.scene = None
 
+    def _trigger_kick_sweep(self):
+        self.kick_age = 0.0
+        self.kick_count += 1
+        # Launch a new ballistic whip from the current target to a contrasting wild angle
+        self.sweep_from = self.sweep_to
+        if self.kick_count % 2 == 0:
+            self.sweep_to = float(self.rng.uniform(0.35, 0.92))
+        else:
+            self.sweep_to = float(self.rng.uniform(-0.42, 0.15))
+
     def update(self, f: Features):
         if f.section != self.section:
             self.section, self.bars = f.section, 0
             self._pick()
+
+        bt = f.beat_count + f.beat_phase
+        dbt = bt - self._last_bt
+        self._last_bt = bt
+        if 0 < dbt < 1:
+            self.rt += dbt * (1 + 5 * f.build if f.section == BUILD else 1)
+            self.kick_age += dbt
+            self.snare_age += dbt
+
+        # 1. Detect rising-edge kick transients (or hard beat downbeats) to trigger ballistic sweeps
+        kick_edge = (f.kick > 0.45 and self._prev_kick <= 0.45) or (f.beat_count != self._last_beat and f.kick > 0.3)
+        if kick_edge and self.kick_age > 0.18:
+            self._trigger_kick_sweep()
+        self._prev_kick = f.kick
+
+        # 2. Extract high-frequency transient energy directly from `f.wave` for snares & hi-hats
+        w = f.wave
+        if len(w) > 8:
+            # First-order difference isolates high frequencies (hats, claps, snare snap)
+            hf = float(np.sqrt(np.mean(np.diff(w) ** 2)))
+            self._hi_avg = 0.92 * self._hi_avg + 0.08 * hf
+            rel_hi = hf / max(self._hi_avg, 1e-4)
+            self.hi_energy = float(np.clip((rel_hi - 0.85) * 0.9, 0.0, 1.0))
+
+            # Sharp spike in HF energy triggers a snare/clap ceiling slam or polarity inversion
+            if rel_hi > 1.55 and self._prev_hi <= 1.55 and self.snare_age > 0.22:
+                self.snare_age = 0.0
+                self.snare_count += 1
+            self._prev_hi = rel_hi
+
         if f.beat_count != self._last_beat:
             if f.bar_pos == 0:
                 self.bars += 1
@@ -468,16 +510,24 @@ class FXEngine:
 
         hue = self.hue
         if f.section == DROP:
-            hue = [0.0, 0.1, 0.2, 0.4][(f.beat_count // 16) % 4]
+            # Shift festival palette aggressively every 8 beats on drops
+            hue = [0.0, 0.1, 0.2, 0.4][(f.beat_count // 8) % 4]
         elif f.section == BREAKDOWN:
             hue = 0.0
 
-        bt = f.beat_count + f.beat_phase
-        dbt = bt - self._last_bt
-        self._last_bt = bt
-        if 0 < dbt < 1:
-            self.rt += dbt * (1 + 5 * f.build if f.section == BUILD else 1)
-        c = Ctx(f, bt, hue, self.rng, rt=self.rt, strobe=self.strobe_enabled, detail=self.detail)
+        c = Ctx(
+            f, bt, hue, self.rng,
+            rt=self.rt,
+            strobe=self.strobe_enabled,
+            detail=self.detail,
+            kick_age=self.kick_age,
+            kick_count=self.kick_count,
+            snare_age=self.snare_age,
+            snare_count=self.snare_count,
+            hi_energy=self.hi_energy,
+            sweep_from=self.sweep_from,
+            sweep_to=self.sweep_to,
+        )
         if not self.scene or f.section == SILENCE:
             return [], None
         return SCENES[self.scene](c), self.scene
