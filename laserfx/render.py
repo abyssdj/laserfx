@@ -38,10 +38,16 @@ def _order(items):
 
 
 def _corner_dwell(xy, dwell):
-    """Points to hold at each vertex: `dwell` at a 90 degree corner, scaling with the turning angle, none on curves."""
+    """Points to hold at vertices: holds `dwell` on sharp turns AND gives 2-point rays bright aerial endpoints."""
     n = len(xy)
     d = np.zeros(n, int)
-    if dwell <= 0 or n < 3:
+    if dwell <= 0 or n < 2:
+        return d
+    if n == 2:
+        # Hold laser briefly at both ends of straight beams for crisp modern 'hot-beam' aerial dots
+        end_hold = min(dwell, 3)
+        d[0] = end_hold
+        d[-1] = end_hold
         return d
     v = np.diff(xy, axis=0)
     ok = np.hypot(v[:, 0], v[:, 1]) > 1e-9
@@ -49,17 +55,18 @@ def _corner_dwell(xy, dwell):
     turn = np.abs((np.diff(a) + np.pi) % (2 * np.pi) - np.pi)
     turn = np.where(ok[:-1] & ok[1:], turn, 0.0)
     d[1:-1] = np.round(dwell * turn / (np.pi / 2)).astype(int)
+    d[0] = 1
     d[-1] = 1
     return d
 
 
-def _jump_points(dist, jump_scale=20, max_step=0.04):
-    """Blanked points for a jump: enough that the eased peak speed (1.5x average) stays under max_step per point."""
-    return max(4 + int(dist * jump_scale), int(np.ceil(dist * 1.5 / max_step)))
+def _jump_points(dist, jump_scale=18, max_step=0.045):
+    """Blanked points for a jump: fast enough for crisp dashed beams without overshooting galvos."""
+    return max(3 + int(dist * jump_scale), int(np.ceil(dist * 1.5 / max_step)))
 
 
-def compose(paths, budget=800, max_points=4000, size=0.8, settle=2, jump_scale=20, min_spacing=0.015,
-            max_blank_frac=0.4):
+def compose(paths, budget=800, max_points=4000, size=0.8, settle=2, jump_scale=18, min_spacing=0.015,
+            max_blank_frac=0.58):
     items = []
     for p in paths:
         if len(p.pts) < 2:
@@ -81,8 +88,8 @@ def compose(paths, budget=800, max_points=4000, size=0.8, settle=2, jump_scale=2
             o += 2 * settle + _jump_points(np.hypot(*(b - V[-1, :2])), jump_scale)
         return o
 
-    # too much blanking makes the picture dim and the scanners work hard: drop the lowest-priority paths
-    while len(items) > 3 and overhead_of(items) > max_blank_frac * budget:
+    # Allow higher blanking fraction so dashed 'bullet' beams and multi-ray fans stay intact
+    while len(items) > 4 and overhead_of(items) > max_blank_frac * budget:
         items.pop()
 
     dw = [_corner_dwell(V[:, :2], d) for V, _, d in items]
@@ -118,7 +125,7 @@ def compose(paths, budget=800, max_points=4000, size=0.8, settle=2, jump_scale=2
 class SafetyLimiter:
     """Global brightness plus a static-beam guard (a lit, near-stationary point is blanked)."""
 
-    def __init__(self, brightness=0.5, min_extent=0.04):
+    def __init__(self, brightness=0.5, min_extent=0.03):
         self.brightness, self.min_extent = brightness, min_extent
         self.tripped = False
 
