@@ -29,7 +29,7 @@ class Bar(W):
         d.line([self.x1, self.y2, self.x2, self.y2], C["line"], 1, self.tag)
         x, y = self.x1 + M, self.y1 + 15
         d.rrect(x, y, x + 32, y + 32, 9, C["accent"], C["accent"], 1, self.tag)
-        for dx in (-9, 0, 9):                                   # three beams fanning up from a point
+        for dx in (-9, 0, 9):
             d.line([x + 16, y + 25, x + 16 + dx, y + 7], C["white"], 2, self.tag)
         d.text(x + 44, y + 1, "LaserFX", C["text"], self.ui.f["title"], "nw", self.tag)
         d.text(x + 44, y + 22, "sound to light", C["muted"], self.ui.f["small"], "nw", self.tag)
@@ -40,8 +40,8 @@ class App:
         self.root = root
         root.title("LaserFX")
         root.configure(bg=C["bg"])
-        root.minsize(1040, 680)
-        self.canvas = tk.Canvas(root, bg=C["bg"], highlightthickness=0, bd=0, width=1100, height=700)
+        root.minsize(1040, 720)
+        self.canvas = tk.Canvas(root, bg=C["bg"], highlightthickness=0, bd=0, width=1100, height=760)
         self.canvas.pack(fill="both", expand=True)
         self.ui = UI(root, self.canvas, k)
         self.settings = Settings()
@@ -54,7 +54,7 @@ class App:
         self._last_snap = None
         self._last_hud_t = 0.0
         self._build()
-        self._layout(1100, 700)
+        self._layout(1100, 760)
         self.canvas.bind("<Configure>", lambda e: self._layout(e.width / k, e.height / k))
         root.bind("<space>", lambda e: self._toggle_blackout())
         root.bind("<Escape>", lambda e: self._toggle_blackout())
@@ -98,6 +98,7 @@ class App:
                                         lambda v: setattr(self, "out_mode", v), self._mode_changed))
         self.tg_arm = reg(T, Toggle(u, "Armed", lambda: self.armed, lambda v: setattr(self, "armed", v),
                                     "Beam masked, aimed safely, e-stop in reach"))
+
         L = self.look = []
         reg(L, Slider(u, "Brightness", 0, 1, lambda: s.brightness, lambda v: setattr(s, "brightness", v), "{:.0%}"))
         reg(L, Slider(u, "Size", 0.1, 1, lambda: s.size, lambda v: setattr(s, "size", v), "{:.0%}"))
@@ -110,19 +111,23 @@ class App:
         secs = [("auto", "Auto"), (MAIN, "Main"), (BREAKDOWN, "Breakdown"), (BUILD, "Build"), (DROP, "Drop")]
         reg(L, Dropdown(u, "Section", secs, lambda: s.section or "auto",
                         lambda v: setattr(s, "section", None if v == "auto" else v)))
+
         S = self.scan = []
-        reg(S, Stepper(u, "Points per second", lambda: s.pps, lambda v: (setattr(s, "pps", int(v)), self._fps()), 1000,
-                       5000, 60000, "{:,}"))
-        reg(S, Stepper(u, "Points per frame", lambda: s.points, lambda v: (setattr(s, "points", int(v)), self._fps()),
-                       50, 200, 3000, "{:,}"))
+        self.st_pps = reg(S, Stepper(u, "Points per second", lambda: s.pps, lambda v: (setattr(s, "pps", int(v)), self._fps()),
+                                     1000, 5000, 60000, "{:,}"))
+        self.st_pts = reg(S, Stepper(u, "Points per frame", lambda: s.points, lambda v: (setattr(s, "points", int(v)), self._fps()),
+                                     50, 100, 3000, "{:,}"))
         self.fps_lbl = reg(S, Label(u, "", "mid", C["ok"], "w"))
+        self.cap_galvo = reg(S, Label(u, "GALVO & COLOR LAG", "tiny", C["dim"]))
+        self.st_lag = reg(S, Stepper(u, "Color shift (galvo lag)", lambda: s.galvo_lag, lambda v: setattr(s, "galvo_lag", int(v)),
+                                     1, -10, 10, "{:+d} pts"))
+        self.st_dwell = reg(S, Stepper(u, "Corner dwell", lambda: s.corner_dwell, lambda v: setattr(s, "corner_dwell", int(v)),
+                                       1, 0, 6, "{:d} pts"))
+        self.st_blank = reg(S, Stepper(u, "Blanking delay", lambda: s.blank_delay, lambda v: setattr(s, "blank_delay", int(v)),
+                                       1, 0, 6, "{:d} pts"))
         self.cap_flip = reg(S, Label(u, "ORIENTATION", "tiny", C["dim"]))
-        for t, n in (("Flip X", "flip_x"), ("Flip Y", "flip_y"), ("Swap X/Y", "swap_xy")):
-            reg(S, Chip(u, t, lambda n=n: getattr(s, n), lambda v, n=n: setattr(s, n, v)))
-        self.help = [reg(S, Label(u, t, "small", C["dim"])) for t in (
-            "Lower points per second for slower scanners.",
-            "Frames are auto-capped to keep at least 30 fps.",
-            "Use Flip / Swap if the image is mirrored or rotated.")]
+        self.chips_flip = [reg(S, Chip(u, t, lambda n=n: getattr(s, n), lambda v, n=n: setattr(s, n, v)))
+                           for t, n in (("Flip X", "flip_x"), ("Flip Y", "flip_y"), ("Swap X/Y", "swap_xy"))]
 
         self.btn_start = Button(u, "Start", self._start_stop, "success", "h")
         self.btn_black = Button(u, "Blackout  ·  Space", self._toggle_blackout, "outline_danger", "h")
@@ -169,6 +174,7 @@ class App:
         self.cap_out.place(ix, y + 184, iw, 12)
         self.seg_out.place(ix, y + 204, iw, 38)
         self.tg_arm.place(ix, y + 256, iw, 48)
+
         # look tab
         y = by + 14
         for i, w in enumerate(self.look[:3]):
@@ -176,16 +182,19 @@ class App:
         self.look[3].place(ix, y + 170, iw, 48)
         self.look[4].place(ix, y + 232, iw, 40)
         self.look[5].place(ix, y + 280, iw, 40)
+
         # scanner tab
         y = by + 14
-        self.scan[0].place(ix, y, iw, 40)
-        self.scan[1].place(ix, y + 50, iw, 40)
-        self.fps_lbl.place(ix, y + 106, iw, 28)
-        self.cap_flip.place(ix, y + 156, iw, 12)
-        for i, c in enumerate(self.scan[4:7]):
-            c.place(ix + i * 112, y + 176, 100, 32)
-        for i, hl in enumerate(self.help):
-            hl.place(ix, y + 232 + i * 20, iw, 16)
+        self.st_pps.place(ix, y, iw, 34)
+        self.st_pts.place(ix, y + 40, iw, 34)
+        self.fps_lbl.place(ix, y + 80, iw, 20)
+        self.cap_galvo.place(ix, y + 110, iw, 12)
+        self.st_lag.place(ix, y + 126, iw, 34)
+        self.st_dwell.place(ix, y + 166, iw, 34)
+        self.st_blank.place(ix, y + 206, iw, 34)
+        self.cap_flip.place(ix, y + 252, iw, 12)
+        for i, c in enumerate(self.chips_flip):
+            c.place(ix + i * 112, y + 270, 104, 32)
         self._apply_visibility()
 
     def _apply_visibility(self):
@@ -212,10 +221,10 @@ class App:
 
     def _fps(self):
         s = self.settings
-        n = max(100, min(s.points, s.pps // s.min_fps))
+        n = max(90, min(s.points, s.pps // max(s.min_fps, 1)))
         fps = s.pps / n
         self.fps_lbl.text = f"{fps:.0f} fps refresh" + ("   (frame capped)" if n < s.points else "")
-        self.fps_lbl.color = C["ok"] if fps >= 30 else C["warn"]
+        self.fps_lbl.color = C["ok"] if fps >= 60 else C["warn"]
         if self.fps_lbl.visible:
             self.fps_lbl.redraw()
 
@@ -312,10 +321,8 @@ class App:
             hdr = f"{snap.scene or '–'}   ·   {n} pts   ·   {s.pps / n:.0f} fps"
             if snap.tripped:
                 hdr += "   ·   static-beam guard"
-            # Render laser preview at full ~120 FPS
             self.preview.update(snap.frame, hdr, s.blackout)
 
-            # Throttle meters/timeline/BPM to ~20 Hz so canvas redraws stay fast
             now = time.perf_counter()
             if now - self._last_hud_t >= 0.05:
                 self._last_hud_t = now
@@ -329,7 +336,7 @@ class App:
 
 
 def main():
-    if sys.platform == "win32":                     # crisp text on high-DPI screens
+    if sys.platform == "win32":
         try:
             import ctypes
             ctypes.windll.shcore.SetProcessDpiAwareness(1)
@@ -340,7 +347,7 @@ def main():
         k = min(max(root.winfo_fpixels("1i") / 96.0, 1.0), 2.5)
     except Exception:  # noqa: BLE001
         k = 1.0
-    root.geometry(f"{int(1100 * k)}x{int(700 * k)}")
+    root.geometry(f"{int(1100 * k)}x{int(760 * k)}")
     App(root, k)
     root.mainloop()
 
