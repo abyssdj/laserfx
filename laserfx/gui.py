@@ -1,4 +1,6 @@
-"""LaserFX desktop GUI: a custom-drawn, dark, modern interface on a single tkinter Canvas (stdlib only)."""
+"""LaserFX desktop GUI: QuickShow-inspired live busking cue grid, Projection Zones,
+Tap Tempo, Scanner & Galvo calibration with built-in test patterns.
+"""
 from __future__ import annotations
 
 import os
@@ -9,14 +11,14 @@ from tkinter import filedialog, messagebox
 
 from . import audio
 from .audio import BREAKDOWN, BUILD, DROP, MAIN, SILENCE
-from .fx import SCENES
+from .fx import QUICK_CUES, SCENES, TEST_PATTERNS
 from .session import Session, Settings
 from .ui import (C, UI, W, BeatDots, Button, Card, Chip, Dropdown, Label, Meter, Pill, Preview, Segmented, Slider,
                  Stepper, Timeline, Toggle)
 
 SECTION_COLORS = {MAIN: "#3b82f6", BREAKDOWN: "#8b5cf6", BUILD: "#f59e0b", DROP: "#ef4444", SILENCE: "#475569"}
-RW = 392            # right column width
-M = 20              # outer margin
+RW = 408            # right column width
+M = 18              # outer margin
 
 
 class Bar(W):
@@ -27,12 +29,12 @@ class Bar(W):
         d = self.ui.d
         d.rect(self.x1, self.y1, self.x2, self.y2, C["bg"], "", 0, self.tag)
         d.line([self.x1, self.y2, self.x2, self.y2], C["line"], 1, self.tag)
-        x, y = self.x1 + M, self.y1 + 15
+        x, y = self.x1 + M, self.y1 + 14
         d.rrect(x, y, x + 32, y + 32, 9, C["accent"], C["accent"], 1, self.tag)
         for dx in (-9, 0, 9):
             d.line([x + 16, y + 25, x + 16 + dx, y + 7], C["white"], 2, self.tag)
         d.text(x + 44, y + 1, "LaserFX", C["text"], self.ui.f["title"], "nw", self.tag)
-        d.text(x + 44, y + 22, "sound to light", C["muted"], self.ui.f["small"], "nw", self.tag)
+        d.text(x + 44, y + 21, "pro aerial laser controller", C["muted"], self.ui.f["small"], "nw", self.tag)
 
 
 class App:
@@ -40,24 +42,29 @@ class App:
         self.root = root
         root.title("LaserFX")
         root.configure(bg=C["bg"])
-        root.minsize(1040, 740)
-        self.canvas = tk.Canvas(root, bg=C["bg"], highlightthickness=0, bd=0, width=1100, height=780)
+        root.minsize(1080, 760)
+        self.canvas = tk.Canvas(root, bg=C["bg"], highlightthickness=0, bd=0, width=1140, height=800)
         self.canvas.pack(fill="both", expand=True)
         self.ui = UI(root, self.canvas, k)
         self.settings = Settings()
         self.session = Session(self.settings)
         self.samples, self.file_name = None, ""
-        self.src_mode, self.out_mode, self.armed, self.tab = "file", "preview", False, "setup"
+        self.src_mode, self.out_mode, self.armed, self.tab = "file", "preview", False, "live"
         self.devs = self._input_devices()
         self.dev_idx = self.devs[0][0] if self.devs else None
         self.play = True
         self._last_snap = None
         self._last_hud_t = 0.0
         self._build()
-        self._layout(1100, 780)
+        self._layout(1140, 800)
         self.canvas.bind("<Configure>", lambda e: self._layout(e.width / k, e.height / k))
         root.bind("<space>", lambda e: self._toggle_blackout())
         root.bind("<Escape>", lambda e: self._on_escape())
+        root.bind("<t>", lambda e: self._tap_tempo())
+        root.bind("<T>", lambda e: self._tap_tempo())
+        for idx in range(len(QUICK_CUES)):
+            root.bind(str(idx + 1), lambda e, i=idx: self._trigger_cue(QUICK_CUES[i][0]))
+        root.bind("0", lambda e: self._trigger_cue(None))
         root.protocol("WM_DELETE_WINDOW", self._close)
         self._tick()
 
@@ -66,6 +73,28 @@ class App:
             self.ui.active_dropdown.close()
         else:
             self._toggle_blackout()
+
+    def _tap_tempo(self):
+        self.session.tap_tempo()
+        mbpm = self.session.manual_bpm
+        if mbpm is not None:
+            self.btn_tap.set(f"Tap · {mbpm:.0f}", "primary")
+
+    def _reset_bpm(self):
+        self.session.clear_manual_bpm()
+        self.btn_tap.set("Tap BPM · T", "secondary")
+
+    def _trigger_cue(self, scene_key: str | None):
+        self.settings.test_pattern = "off"
+        self.settings.scene = scene_key
+        self._sync_cue_chips()
+        self.ui.redraw_all()
+
+    def _sync_cue_chips(self):
+        if hasattr(self, "cue_auto"):
+            self.cue_auto.redraw()
+            for c in self.cue_chips:
+                c.redraw()
 
     # ----------------------------------------------------------------- build
     def _build(self):
@@ -79,19 +108,88 @@ class App:
         self.bpm_cap = Label(u, "BPM", "tiny", C["dim"])
         self.bpm = Label(u, "---", "big", C["text"])
         self.section = Pill(u, "IDLE", C["dim"])
+        self.btn_tap = Button(u, "Tap BPM · T", self._tap_tempo, "secondary", "small")
+        self.btn_auto_bpm = Button(u, "Auto", self._reset_bpm, "secondary", "small")
         self.beats = BeatDots(u)
         self.meters = {n: Meter(u, n, c) for n, c in (("bass", C["accent"]), ("mid", C["accent2"]), ("high", "#f472b6"))}
         self.tl_cap = Label(u, "SECTIONS", "tiny", C["dim"])
         self.timeline = Timeline(u, SECTION_COLORS)
 
-        # right: tabs + body card + actions
-        self.tabs = Segmented(u, [("setup", "Setup"), ("look", "Look"), ("scanner", "Scanner")],
-                             lambda: self.tab, lambda v: setattr(self, "tab", v), self._tab_changed)
+        # right: 4 tabs (Live / Zone / Scanner / Setup) + body card + actions
+        self.tabs = Segmented(
+            u,
+            [("live", "Live"), ("zone", "Zone"), ("scanner", "Scanner"), ("setup", "Setup")],
+            lambda: self.tab,
+            lambda v: setattr(self, "tab", v),
+            self._tab_changed,
+        )
         self.body = Card(u)
-        self.setup = []
         reg = lambda lst, w: (lst.append(w), w)[1]                        # noqa: E731
-        T = self.setup
-        self.cap_src = reg(T, Label(u, "SOURCE", "tiny", C["dim"]))
+
+        # --- TAB 1: LIVE (Quick-Cue Grid + Look Controls)
+        L = self.live = []
+        self.cap_cues = reg(L, Label(u, "QUICK CUES  (KEYS 1–8 · 0 AUTO)", "tiny", C["dim"]))
+        self.cue_auto = reg(L, Chip(u, "Auto Show (0)", lambda: s.scene is None, lambda _: self._trigger_cue(None)))
+        self.cue_chips = [
+            reg(
+                L,
+                Chip(
+                    u,
+                    f"{i + 1} · {lbl}",
+                    lambda k=key: s.scene == k,
+                    lambda _, k=key: self._trigger_cue(k),
+                ),
+            )
+            for i, (key, lbl) in enumerate(QUICK_CUES)
+        ]
+        self.sl_bright = reg(L, Slider(u, "Master brightness", 0, 1, lambda: s.brightness, lambda v: setattr(s, "brightness", v), "{:.0%}"))
+        self.sl_detail = reg(L, Slider(u, "Beam density / detail", 0.2, 1, lambda: s.detail, lambda v: setattr(s, "detail", v), "{:.0%}"))
+        self.tg_strobe = reg(L, Toggle(u, "Strobe effects", lambda: s.strobe, lambda v: setattr(s, "strobe", v),
+                                       "Turn off for photosensitive audiences"))
+        scenes = [("auto", "Auto (Full Library)")] + [(n, n.replace("_", " ").title()) for n in sorted(SCENES)]
+        self.dd_scene = reg(L, Dropdown(u, "Scene lock", scenes, lambda: s.scene or "auto",
+                                        lambda v: (setattr(s, "scene", None if v == "auto" else v), self._sync_cue_chips())))
+        secs = [("auto", "Auto"), (MAIN, "Main"), (BREAKDOWN, "Breakdown"), (BUILD, "Build"), (DROP, "Drop")]
+        self.dd_sec = reg(L, Dropdown(u, "Section lock", secs, lambda: s.section or "auto",
+                                      lambda v: setattr(s, "section", None if v == "auto" else v)))
+
+        # --- TAB 2: ZONE (Projection Framing, Position & Keystone)
+        Z = self.zone = []
+        self.cap_zone = reg(Z, Label(u, "PROJECTION ZONE GEOMETRY", "tiny", C["dim"]))
+        self.sl_size = reg(Z, Slider(u, "Master scale", 0.1, 1.0, lambda: s.size, lambda v: setattr(s, "size", v), "{:.0%}"))
+        self.sl_sx = reg(Z, Slider(u, "Width (X scale)", 0.2, 1.0, lambda: s.scale_x, lambda v: setattr(s, "scale_x", v), "{:.0%}"))
+        self.sl_sy = reg(Z, Slider(u, "Height (Y scale)", 0.2, 1.0, lambda: s.scale_y, lambda v: setattr(s, "scale_y", v), "{:.0%}"))
+        self.sl_ox = reg(Z, Slider(u, "Horizontal pan (X offset)", -0.6, 0.6, lambda: s.offset_x, lambda v: setattr(s, "offset_x", v), "{:+.0%}"))
+        self.sl_oy = reg(Z, Slider(u, "Vertical elevation (Y offset)", -0.6, 0.6, lambda: s.offset_y, lambda v: setattr(s, "offset_y", v), "{:+.0%}"))
+        self.sl_ks = reg(Z, Slider(u, "Vertical keystone", -0.4, 0.4, lambda: s.keystone, lambda v: setattr(s, "keystone", v), "{:+.0%}"))
+        self.btn_zone_reset = reg(Z, Button(u, "Reset Zone to Full Frame", self._reset_zone, "secondary", "small"))
+
+        # --- TAB 3: SCANNER (Galvo Speed, Sharp Corner Physics & Test Patterns)
+        S = self.scan = []
+        self.st_pps = reg(S, Stepper(u, "Points per second", lambda: s.pps, lambda v: (setattr(s, "pps", int(v)), self._fps()),
+                                     1000, 5000, 60000, "{:,}"))
+        self.st_pts = reg(S, Stepper(u, "Points per frame", lambda: s.points, lambda v: (setattr(s, "points", int(v)), self._fps()),
+                                     50, 100, 3000, "{:,}"))
+        self.fps_lbl = reg(S, Label(u, "", "mid", C["ok"], "w"))
+        self.cap_galvo = reg(S, Label(u, "GALVO & CORNER SHARPNESS", "tiny", C["dim"]))
+        self.st_lag = reg(S, Stepper(u, "Color shift (galvo lag)", lambda: s.galvo_lag, lambda v: setattr(s, "galvo_lag", int(v)),
+                                     1, -12, 12, "{:+d} pts"))
+        self.st_dwell = reg(S, Stepper(u, "Corner dwell", lambda: s.corner_dwell, lambda v: setattr(s, "corner_dwell", int(v)),
+                                       1, 0, 12, "{:d} pts"))
+        self.st_blank = reg(S, Stepper(u, "Blanking delay", lambda: s.blank_delay, lambda v: setattr(s, "blank_delay", int(v)),
+                                       1, 0, 12, "{:d} pts"))
+        self.sl_brake = reg(S, Slider(u, "Corner deceleration", 0.0, 1.0, lambda: s.corner_brake,
+                                      lambda v: setattr(s, "corner_brake", v), "{:.0%}"))
+        patterns = [("off", "Off (Live Show)")] + [(k, v) for k, v in TEST_PATTERNS.items()]
+        self.dd_test = reg(S, Dropdown(u, "Test pattern", patterns, lambda: s.test_pattern,
+                                       lambda v: setattr(s, "test_pattern", v)))
+        self.cap_flip = reg(S, Label(u, "ORIENTATION", "tiny", C["dim"]))
+        self.chips_flip = [reg(S, Chip(u, t, lambda n=n: getattr(s, n), lambda v, n=n: setattr(s, n, v)))
+                           for t, n in (("Flip X", "flip_x"), ("Flip Y", "flip_y"), ("Swap X/Y", "swap_xy"))]
+
+        # --- TAB 4: SETUP (Audio Source & Helios DAC Output)
+        T = self.setup = []
+        self.cap_src = reg(T, Label(u, "AUDIO SOURCE", "tiny", C["dim"]))
         self.seg_src = reg(T, Segmented(u, [("file", "Audio file"), ("live", "Live input")], lambda: self.src_mode,
                                         lambda v: setattr(self, "src_mode", v), self._mode_changed))
         self.btn_file = reg(T, Button(u, "Choose file…", self._open_file))
@@ -105,74 +203,93 @@ class App:
         self.tg_arm = reg(T, Toggle(u, "Armed", lambda: self.armed, lambda v: setattr(self, "armed", v),
                                     "Beam masked, aimed safely, e-stop in reach"))
 
-        L = self.look = []
-        reg(L, Slider(u, "Brightness", 0, 1, lambda: s.brightness, lambda v: setattr(s, "brightness", v), "{:.0%}"))
-        reg(L, Slider(u, "Size", 0.1, 1, lambda: s.size, lambda v: setattr(s, "size", v), "{:.0%}"))
-        reg(L, Slider(u, "Detail", 0.2, 1, lambda: s.detail, lambda v: setattr(s, "detail", v), "{:.0%}"))
-        reg(L, Toggle(u, "Strobe effects", lambda: s.strobe, lambda v: setattr(s, "strobe", v),
-                      "Flashing: turn off for photosensitive audiences"))
-        scenes = [("auto", "Auto")] + [(n, n.replace("_", " ").title()) for n in sorted(SCENES)]
-        reg(L, Dropdown(u, "Scene", scenes, lambda: s.scene or "auto",
-                        lambda v: setattr(s, "scene", None if v == "auto" else v)))
-        secs = [("auto", "Auto"), (MAIN, "Main"), (BREAKDOWN, "Breakdown"), (BUILD, "Build"), (DROP, "Drop")]
-        reg(L, Dropdown(u, "Section", secs, lambda: s.section or "auto",
-                        lambda v: setattr(s, "section", None if v == "auto" else v)))
-
-        S = self.scan = []
-        self.st_pps = reg(S, Stepper(u, "Points per second", lambda: s.pps, lambda v: (setattr(s, "pps", int(v)), self._fps()),
-                                     1000, 5000, 60000, "{:,}"))
-        self.st_pts = reg(S, Stepper(u, "Points per frame", lambda: s.points, lambda v: (setattr(s, "points", int(v)), self._fps()),
-                                     50, 100, 3000, "{:,}"))
-        self.fps_lbl = reg(S, Label(u, "", "mid", C["ok"], "w"))
-        self.cap_galvo = reg(S, Label(u, "GALVO & CORNER TUNING", "tiny", C["dim"]))
-        self.st_lag = reg(S, Stepper(u, "Color shift (galvo lag)", lambda: s.galvo_lag, lambda v: setattr(s, "galvo_lag", int(v)),
-                                     1, -12, 12, "{:+d} pts"))
-        self.st_dwell = reg(S, Stepper(u, "Corner dwell", lambda: s.corner_dwell, lambda v: setattr(s, "corner_dwell", int(v)),
-                                       1, 0, 12, "{:d} pts"))
-        self.st_blank = reg(S, Stepper(u, "Blanking delay", lambda: s.blank_delay, lambda v: setattr(s, "blank_delay", int(v)),
-                                       1, 0, 12, "{:d} pts"))
-        self.sl_brake = reg(S, Slider(u, "Corner deceleration", 0.0, 1.0, lambda: s.corner_brake,
-                                      lambda v: setattr(s, "corner_brake", v), "{:.0%}"))
-        self.cap_flip = reg(S, Label(u, "ORIENTATION", "tiny", C["dim"]))
-        self.chips_flip = [reg(S, Chip(u, t, lambda n=n: getattr(s, n), lambda v, n=n: setattr(s, n, v)))
-                           for t, n in (("Flip X", "flip_x"), ("Flip Y", "flip_y"), ("Swap X/Y", "swap_xy"))]
-
         self.btn_start = Button(u, "Start", self._start_stop, "success", "h")
         self.btn_black = Button(u, "Blackout  ·  Space", self._toggle_blackout, "outline_danger", "h")
+
+    def _reset_zone(self):
+        s = self.settings
+        s.size = 0.70
+        s.scale_x = 1.0
+        s.scale_y = 1.0
+        s.offset_x = 0.0
+        s.offset_y = 0.0
+        s.keystone = 0.0
+        self.ui.redraw_all()
 
     # ---------------------------------------------------------------- layout
     def _layout(self, W_, H_):
         u = self.ui
         u.logical_h = H_
-        self.bar.place(0, 0, W_, 62)
-        self.status.place(W_ - M - 190, 16, 190, 30)
-        top = 62 + M
+        self.bar.place(0, 0, W_, 60)
+        self.status.place(W_ - M - 190, 15, 190, 30)
+        top = 60 + M
         lw = W_ - RW - 3 * M
-        now_h = 208
+        now_h = 204
         self.preview.place(M, top, lw, H_ - top - M - now_h - 14)
         ny = top + self.preview.h + 14
         self.now_card.place(M, ny, lw, now_h)
-        self.bpm_cap.place(M + 20, ny + 38, 60, 14)
-        self.bpm.place(M + 20, ny + 50, 170, 56)
-        self.section.place(M + 196, ny + 54, 150, 30)
-        self.beats.place(M + lw - 20 - 190, ny + 54, 190, 30)
+        self.bpm_cap.place(M + 20, ny + 36, 60, 14)
+        self.bpm.place(M + 20, ny + 48, 130, 52)
+        self.section.place(M + 154, ny + 52, 136, 30)
+        self.btn_tap.place(M + 298, ny + 52, 92, 30)
+        self.btn_auto_bpm.place(M + 396, ny + 52, 48, 30)
+        self.beats.place(M + lw - 20 - 150, ny + 52, 150, 30)
         mw = (lw - 40 - 2 * 18) / 3
         for i, m in enumerate(self.meters.values()):
-            m.place(M + 20 + i * (mw + 18), ny + 116, mw, 30)
-        self.tl_cap.place(M + 20, ny + 158, 90, 12)
-        self.timeline.place(M + 20, ny + 174, lw - 40, 16)
+            m.place(M + 20 + i * (mw + 18), ny + 112, mw, 30)
+        self.tl_cap.place(M + 20, ny + 154, 90, 12)
+        self.timeline.place(M + 20, ny + 170, lw - 40, 16)
 
         rx = W_ - M - RW
-        self.tabs.place(rx, top, RW, 40)
-        by = top + 52
-        bh = H_ - by - M - 2 * 48 - 2 * 12
+        self.tabs.place(rx, top, RW, 38)
+        by = top + 48
+        bh = H_ - by - M - 2 * 46 - 2 * 10
         self.body.place(rx, by, RW, bh)
-        ix, iw = rx + 20, RW - 40
-        self.btn_start.place(rx, H_ - M - 48 - 12 - 48, RW, 48)
-        self.btn_black.place(rx, H_ - M - 48, RW, 48)
+        ix, iw = rx + 18, RW - 36
+        self.btn_start.place(rx, H_ - M - 46 - 10 - 46, RW, 46)
+        self.btn_black.place(rx, H_ - M - 46, RW, 46)
 
-        # setup tab
-        y = by + 18
+        # --- LIVE TAB
+        y = by + 12
+        self.cap_cues.place(ix, y, iw - 110, 12)
+        self.cue_auto.place(ix + iw - 104, y - 5, 104, 22)
+        cw = (iw - 8) / 2
+        for i, chip in enumerate(self.cue_chips):
+            col_i = i % 2
+            row_i = i // 2
+            chip.place(ix + col_i * (cw + 8), y + 22 + row_i * 32, cw, 27)
+        ly = y + 158
+        self.sl_bright.place(ix, ly, iw, 38)
+        self.sl_detail.place(ix, ly + 42, iw, 38)
+        self.tg_strobe.place(ix, ly + 86, iw, 42)
+        self.dd_scene.place(ix, ly + 134, iw, 36)
+        self.dd_sec.place(ix, ly + 176, iw, 36)
+
+        # --- ZONE TAB
+        y = by + 14
+        self.cap_zone.place(ix, y, iw, 12)
+        for i, sl in enumerate((self.sl_size, self.sl_sx, self.sl_sy, self.sl_ox, self.sl_oy, self.sl_ks)):
+            sl.place(ix, y + 20 + i * 44, iw, 38)
+        self.btn_zone_reset.place(ix, y + 292, iw, 34)
+
+        # --- SCANNER TAB
+        y = by + 12
+        self.st_pps.place(ix, y, iw, 30)
+        self.st_pts.place(ix, y + 34, iw, 30)
+        self.fps_lbl.place(ix, y + 68, iw, 18)
+        self.cap_galvo.place(ix, y + 92, iw, 12)
+        self.st_lag.place(ix, y + 108, iw, 30)
+        self.st_dwell.place(ix, y + 142, iw, 30)
+        self.st_blank.place(ix, y + 176, iw, 30)
+        self.sl_brake.place(ix, y + 210, iw, 38)
+        self.dd_test.place(ix, y + 254, iw, 34)
+        self.cap_flip.place(ix, y + 298, iw, 12)
+        fw = (iw - 16) / 3
+        for i, c in enumerate(self.chips_flip):
+            c.place(ix + i * (fw + 8), y + 314, fw, 28)
+
+        # --- SETUP TAB
+        y = by + 16
         self.cap_src.place(ix, y, iw, 12)
         self.seg_src.place(ix, y + 20, iw, 38)
         self.btn_file.place(ix, y + 72, 140, 36)
@@ -182,39 +299,19 @@ class App:
         self.cap_out.place(ix, y + 184, iw, 12)
         self.seg_out.place(ix, y + 204, iw, 38)
         self.tg_arm.place(ix, y + 256, iw, 48)
-
-        # look tab
-        y = by + 14
-        for i, w in enumerate(self.look[:3]):
-            w.place(ix, y + i * 54, iw, 46)
-        self.look[3].place(ix, y + 170, iw, 48)
-        self.look[4].place(ix, y + 232, iw, 40)
-        self.look[5].place(ix, y + 280, iw, 40)
-
-        # scanner tab
-        y = by + 12
-        self.st_pps.place(ix, y, iw, 32)
-        self.st_pts.place(ix, y + 36, iw, 32)
-        self.fps_lbl.place(ix, y + 72, iw, 18)
-        self.cap_galvo.place(ix, y + 98, iw, 12)
-        self.st_lag.place(ix, y + 114, iw, 32)
-        self.st_dwell.place(ix, y + 150, iw, 32)
-        self.st_blank.place(ix, y + 186, iw, 32)
-        self.sl_brake.place(ix, y + 224, iw, 42)
-        self.cap_flip.place(ix, y + 276, iw, 12)
-        for i, c in enumerate(self.chips_flip):
-            c.place(ix + i * 112, y + 292, 104, 30)
         self._apply_visibility()
 
     def _apply_visibility(self):
         if self.ui.active_dropdown is not None:
             self.ui.active_dropdown.close()
-        for w in self.setup:
-            w.visible = self.tab == "setup"
-        for w in self.look:
-            w.visible = self.tab == "look"
+        for w in self.live:
+            w.visible = self.tab == "live"
+        for w in self.zone:
+            w.visible = self.tab == "zone"
         for w in self.scan:
             w.visible = self.tab == "scanner"
+        for w in self.setup:
+            w.visible = self.tab == "setup"
         file_mode = self.src_mode == "file"
         self.btn_file.visible = self.lbl_file.visible = self.tab == "setup" and file_mode
         self.dd_dev.visible = self.tab == "setup" and not file_mode
@@ -360,7 +457,7 @@ def main():
         k = min(max(root.winfo_fpixels("1i") / 96.0, 1.0), 2.5)
     except Exception:  # noqa: BLE001
         k = 1.0
-    root.geometry(f"{int(1100 * k)}x{int(780 * k)}")
+    root.geometry(f"{int(1140 * k)}x{int(800 * k)}")
     App(root, k)
     root.mainloop()
 

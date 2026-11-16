@@ -1,10 +1,8 @@
 """Custom-drawn dark UI widgets on a single tkinter Canvas (zero external dependencies)."""
 from __future__ import annotations
 
-import math
 import time
 import tkinter as tk
-from dataclasses import dataclass
 
 import numpy as np
 
@@ -76,11 +74,11 @@ class UI:
         self.cv = canvas
         self.k = k
         self.d = Draw(canvas, k)
-        self.logical_h = 760.0
+        self.logical_h = 780.0
         fam = "Segoe UI" if tk.TkVersion >= 8.5 else "Helvetica"
         self.f = {
             "title": (fam, int(round(13 * k)), "bold"),
-            "big": (fam, int(round(28 * k)), "bold"),
+            "big": (fam, int(round(26 * k)), "bold"),
             "h": (fam, int(round(11 * k)), "bold"),
             "body": (fam, int(round(10 * k))),
             "mid": (fam, int(round(10 * k)), "bold"),
@@ -115,12 +113,10 @@ class UI:
         return None
 
     def _on_press(self, e):
-        # If a dropdown popup is open, close it cleanly and swallow this click so it never reopens
         if self.active_dropdown is not None:
             self.active_dropdown.close()
             return
-        # Swallow stray click events within 180ms of a popup dismissal
-        if (time.monotonic() - self._last_popup_close) < 0.18:
+        if (time.monotonic() - self._last_popup_close) < 0.22:
             return
         w = self._hit(e.x, e.y)
         self._drag_target = w
@@ -253,6 +249,8 @@ class Button(W):
         self.text, self.cb, self.style, self.font = text, cb, style, font
 
     def set(self, text, style=None):
+        if text == self.text and (style is None or style == self.style):
+            return
         self.text = text
         if style:
             self.style = style
@@ -270,7 +268,7 @@ class Button(W):
         bg, bd, fg = styles.get(self.style, styles["secondary"])
         if self.hovered:
             bg = mix(bg, C["white"], 0.10)
-        d.rrect(self.x1, self.y1, self.x2, self.y2, 10, bg, bd, 1, self.tag)
+        d.rrect(self.x1, self.y1, self.x2, self.y2, 9, bg, bd, 1, self.tag)
         d.text((self.x1 + self.x2) / 2, (self.y1 + self.y2) / 2, self.text, fg, self.ui.f[self.font], "center", self.tag)
 
     def on_release(self, x, y):
@@ -279,16 +277,16 @@ class Button(W):
 
 
 class Chip(W):
-    def __init__(self, ui: UI, text, getter, setter):
+    def __init__(self, ui: UI, text, getter, setter, on_change=None):
         super().__init__(ui)
-        self.text, self.get, self.set = text, getter, setter
+        self.text, self.get, self.set, self.on_change = text, getter, setter, on_change
 
     def draw(self):
         d = self.ui.d
         on = bool(self.get())
-        bg = mix(C["card2"], C["accent"], 0.28) if on else C["card2"]
+        bg = mix(C["card2"], C["accent"], 0.30) if on else C["card2"]
         bd = C["accent"] if on else (mix(C["line"], C["white"], 0.15) if self.hovered else C["line"])
-        fg = C["text"] if on else C["muted"]
+        fg = C["white"] if on else C["muted"]
         d.rrect(self.x1, self.y1, self.x2, self.y2, 8, bg, bd, 1, self.tag)
         d.text((self.x1 + self.x2) / 2, (self.y1 + self.y2) / 2, self.text, fg, self.ui.f["small"], "center", self.tag)
 
@@ -296,6 +294,8 @@ class Chip(W):
         if self.contains(x, y):
             self.set(not self.get())
             self.redraw()
+            if self.on_change:
+                self.on_change()
 
 
 class Toggle(W):
@@ -344,7 +344,8 @@ class Segmented(W):
             if active:
                 d.rrect(ax1, self.y1 + 3, ax2, self.y2 - 3, 8, C["accent"], "", 0, self.tag)
             d.text((ax1 + ax2) / 2, (self.y1 + self.y2) / 2, lbl,
-                   C["white"] if active else C["muted"], self.ui.f["mid"], "center", self.tag)
+                   C["white"] if active else C["muted"], self.ui.f["small"] if n >= 4 else self.ui.f["mid"],
+                   "center", self.tag)
 
     def on_release(self, x, y):
         if not self.contains(x, y):
@@ -368,14 +369,14 @@ class Slider(W):
         d = self.ui.d
         v = float(self.get())
         u = min(max((v - self.lo) / max(1e-9, self.hi - self.lo), 0.0), 1.0)
-        d.text(self.x1, self.y1 + 10, self.title, C["text"], self.ui.f["body"], "w", self.tag)
-        d.text(self.x2, self.y1 + 10, self.fmt.format(v), C["muted"], self.ui.f["mid"], "e", self.tag)
-        ty = self.y1 + 30
+        d.text(self.x1, self.y1 + 9, self.title, C["text"], self.ui.f["body"], "w", self.tag)
+        d.text(self.x2, self.y1 + 9, self.fmt.format(v), C["muted"], self.ui.f["mid"], "e", self.tag)
+        ty = self.y1 + 27
         d.rrect(self.x1, ty - 3, self.x2, ty + 3, 3, C["card2"], "", 0, self.tag)
         kx = self.x1 + u * self.w
         if kx > self.x1 + 2:
             d.rrect(self.x1, ty - 3, kx, ty + 3, 3, C["accent"], "", 0, self.tag)
-        d.oval(kx - 7, ty - 7, kx + 7, ty + 7, C["white"], C["accent"], 2, self.tag)
+        d.oval(kx - 6.5, ty - 6.5, kx + 6.5, ty + 6.5, C["white"], C["accent"], 2, self.tag)
 
     def _update(self, x):
         u = min(max((x - self.x1) / max(1.0, self.w), 0.0), 1.0)
@@ -407,7 +408,7 @@ class Stepper(W):
         vx1 = vx2 - vw
         mx2 = vx1 - 4
         mx1 = mx2 - bw
-        by1, by2 = cy - 13, cy + 13
+        by1, by2 = cy - 12, cy + 12
         d.rrect(mx1, by1, mx2, by2, 7, C["card2"], C["line"], 1, self.tag)
         d.text((mx1 + mx2) / 2, cy, "−", C["text"], self.ui.f["mid"], "center", self.tag)
         d.text((vx1 + vx2) / 2, cy, self.fmt.format(v), C["text"], self.ui.f["mid"], "center", self.tag)
@@ -434,9 +435,9 @@ class Stepper(W):
 class Dropdown(W):
     """Canvas-drawn selector with a clean floating Toplevel list that never reopens on click."""
 
-    def __init__(self, ui: UI, title, items, getter, setter):
+    def __init__(self, ui: UI, title, items, getter, setter, on_change=None):
         super().__init__(ui)
-        self.title, self.items, self.get, self.set = title, items, getter, setter
+        self.title, self.items, self.get, self.set, self.on_change = title, items, getter, setter, on_change
         self._popup: tk.Toplevel | None = None
 
     def _current_label(self) -> str:
@@ -480,9 +481,10 @@ class Dropdown(W):
     def _select(self, val):
         self.set(val)
         self.close()
+        if self.on_change:
+            self.on_change()
 
     def on_press(self, x, y):
-        # Toggle closed if already open; otherwise open on press (not release) so release never retriggers
         if self._popup is not None:
             self.close()
             return
@@ -510,7 +512,6 @@ class Dropdown(W):
         max_rows = min(len(self.items), 11)
         pop_h = max_rows * row_h + 4
 
-        # Flip upward if near bottom of screen
         scr_h = self.ui.root.winfo_screenheight()
         if root_y + pop_h > scr_h - 24:
             root_y = max(12, self.ui.cv.winfo_rooty() + int(round((self.y1 - 2) * k)) - pop_h)
@@ -564,7 +565,6 @@ class Dropdown(W):
                 cv.yview_scroll(delta, "units")
 
         def _on_outside_click(e):
-            # Close if user clicked anywhere outside the popup window
             w = e.widget
             while w is not None:
                 if w is pop:
@@ -605,12 +605,12 @@ class BeatDots(W):
     def draw(self):
         d = self.ui.d
         cy = (self.y1 + self.y2) / 2
-        gap = 36
-        sx = self.x2 - 16 - 3 * gap
+        gap = 34
+        sx = self.x2 - 14 - 3 * gap
         for i in range(4):
             cx = sx + i * gap
             active = i == self.pos
-            r = (9 + 3 * self.pulse) if active else 7
+            r = (8.5 + 3 * self.pulse) if active else 6.5
             col = (C["danger"] if i == 0 else C["accent"]) if active else C["card2"]
             bd = col if active else C["line"]
             d.oval(cx - r, cy - r, cx + r, cy + r, col, bd, 1, self.tag)
