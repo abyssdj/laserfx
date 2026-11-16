@@ -3,11 +3,8 @@
 Analyzer is a streaming (real-time capable) analyser that tracks:
   * BPM and beat phase (onset-strength autocorrelation + comb phase fit)
   * bar position (downbeat guessed from bass energy on each beat of the bar)
-  * kick pulses and smoothed bass / mid / high levels
+  * multi-band transients: kick (sub/low), snare/clap (mid flux), hi-hat/cymbal (high flux)
   * song sections: MAIN, BREAKDOWN, BUILD, DROP (and SILENCE)
-
-The section logic is heuristic (it works on relative bass / kick energy against a
-rolling reference), so thresholds live in SectionConfig for tuning.
 """
 from __future__ import annotations
 
@@ -45,6 +42,9 @@ class Features:
     mid: float = 0.0
     high: float = 0.0
     kick: float = 0.0             # 1 on a kick onset, decays
+    snare: float = 0.0            # 1 on a snare/clap onset, decays
+    hi_flux: float = 0.0          # 0..1 fast high-frequency percussion / hat energy
+    sub_bass: float = 0.0         # 0..1 fast sub-bass (30-90 Hz) pressure
     section: str = MAIN
     section_time: float = 0.0
     section_beats: int = 0
@@ -84,11 +84,14 @@ class Analyzer:
         self.cfg = cfg or SectionConfig()
         self.win = np.hanning(n_fft).astype(np.float32)
         fr = np.fft.rfftfreq(n_fft, 1 / sr)
+        self.i_sub = (fr >= 30) & (fr < 90)
         self.i_bass = (fr >= 30) & (fr < 150)
         self.i_mid = (fr >= 150) & (fr < 2000)
         self.i_high = (fr >= 2000) & (fr < 12000)
         self.i_flux = fr < 10000
         self.i_low = fr < 200
+        self.i_snare = (fr >= 180) & (fr < 2500)
+        self.i_hi_perc = (fr >= 4000) & (fr < 14000)
 
         self.buf = np.zeros(0, np.float32)
         self.prev = None
@@ -107,16 +110,26 @@ class Analyzer:
         self._bflux = collections.deque(maxlen=3)
         self.bpm_history: list[float] = []
 
-        # smoothers
+        # smoothers & multi-band transient detectors
         ak = lambda tau: 1 - math.exp(-self.dt / tau)  # noqa: E731
-        self.a_fast, self.a_slow = ak(0.15), ak(0.6)
-        self.loud_s = self.bass_s = self.bass_f = self.high_s = self.mid_s = 0.0
+        self.a_snap, self.a_fast, self.a_slow = ak(0.04), ak(0.15), ak(0.6)
+        self.loud_s = self.bass_s = self.bass_f = self.sub_f = self.high_s = self.mid_s = 0.0
         self.lowflux_s = self.lowflux_f = 0.0
+        self.hiflux_f = 0.0
+
         self.kick = 0.0
-        self._kick_decay = math.exp(-self.dt / 0.12)
+        self._kick_decay = math.exp(-self.dt / 0.11)
         self._kick_hist = collections.deque(maxlen=int(2 / self.dt))
         self._last_kick = -1.0
-        self.g_bass, self.g_mid, self.g_high, self.g_loud = (_AutoGain(self.dt) for _ in range(4))
+
+        self.snare = 0.0
+        self._snare_decay = math.exp(-self.dt / 0.10)
+        self._snare_hist = collections.deque(maxlen=int(2 / self.dt))
+        self._last_snare = -1.0
+
+        self.g_bass, self.g_sub, self.g_mid, self.g_high, self.g_loud, self.g_hiflux = (
+            _AutoGain(self.dt) for _ in range(6)
+        )
 
         # sections
         self.tick_n = max(1, int(0.1 / self.dt))
@@ -156,7 +169,11 @@ class Analyzer:
             bass=min(self.bass_f / self.g_bass.ref, 1.5),
             mid=min(self.mid_s / self.g_mid.ref, 1.5),
             high=min(self.high_s / self.g_high.ref, 1.5),
-            kick=self.kick, section=self.section, section_time=now - self._sec_t0,
+            kick=self.kick,
+            snare=self.snare,
+            hi_flux=min(self.hiflux_f / self.g_hiflux.ref, 1.0),
+            sub_bass=min(self.sub_f / self.g_sub.ref, 1.0),
+            section=self.section, section_time=now - self._sec_t0,
             section_beats=self.beat_count - self._sec_beat0, build=self.build,
             wave=self.last_frame[-512:].copy(),
         )
@@ -166,37 +183,58 @@ class Analyzer:
         spec = np.abs(np.fft.rfft(x * self.win)) / self.n_fft
         rms = float(np.sqrt(np.mean(x * x)))
         band = lambda m: float(np.sqrt(np.mean(spec[m] ** 2)))  # noqa: E731
-        bass, mid, high = band(self.i_bass), band(self.i_mid), band(self.i_high)
+        sub, bass, mid, high = band(self.i_sub), band(self.i_bass), band(self.i_mid), band(self.i_high)
         lm = np.log1p(spec * 1000.0)
         if self.prev is None:
-            f_all = f_low = 0.0
+            f_all = f_low = f_snare = f_hi = 0.0
         else:
             d = np.maximum(lm - self.prev, 0.0)
-            f_all, f_low = float(d[self.i_flux].sum()), float(d[self.i_low].sum())
+            f_all = float(d[self.i_flux].sum())
+            f_low = float(d[self.i_low].sum())
+            f_snare = float(d[self.i_snare].mean())
+            f_hi = float(d[self.i_hi_perc].mean())
         self.prev = lm
         self.last_frame = x
         self.env.append(f_all + 2.0 * f_low)
         self._bflux.append(f_low)
 
-        fa, sa = self.a_fast, self.a_slow
+        sn, fa, sa = self.a_snap, self.a_fast, self.a_slow
         self.loud_s += sa * (rms - self.loud_s)
         self.bass_s += sa * (bass - self.bass_s)
         self.bass_f += fa * (bass - self.bass_f)
+        self.sub_f += sn * (sub - self.sub_f)
         self.mid_s += sa * (mid - self.mid_s)
         self.high_s += sa * (high - self.high_s)
         self.lowflux_s += sa * (f_low - self.lowflux_s)
         self.lowflux_f += fa * (f_low - self.lowflux_f)
-        self.g_bass(self.bass_f); self.g_mid(self.mid_s); self.g_high(self.high_s); self.g_loud(self.loud_s)
+        self.hiflux_f += sn * (f_hi - self.hiflux_f)
 
-        # kick detection (adaptive threshold on low-band flux)
+        self.g_bass(self.bass_f)
+        self.g_sub(self.sub_f)
+        self.g_mid(self.mid_s)
+        self.g_high(self.high_s)
+        self.g_loud(self.loud_s)
+        self.g_hiflux(self.hiflux_f)
+
         now = self.frame * self.dt
+
+        # Kick detection (adaptive threshold on low-band flux)
         self.kick *= self._kick_decay
         self._kick_hist.append(f_low)
         if len(self._kick_hist) > 20:
             h = np.fromiter(self._kick_hist, float)
-            thr = h.mean() + 1.2 * h.std()
-            if f_low > thr and f_low > 0.5 and now - self._last_kick > 0.12:
+            thr = h.mean() + 1.15 * h.std()
+            if f_low > thr and f_low > 0.45 and now - self._last_kick > 0.12:
                 self.kick, self._last_kick = 1.0, now
+
+        # Snare / clap onset detection (mid-band spectral flux spike)
+        self.snare *= self._snare_decay
+        self._snare_hist.append(f_snare)
+        if len(self._snare_hist) > 20:
+            hs = np.fromiter(self._snare_hist, float)
+            thr_s = hs.mean() + 1.35 * hs.std()
+            if f_snare > thr_s and f_snare > 0.04 and now - self._last_snare > 0.14:
+                self.snare, self._last_snare = 1.0, now
 
         # beat clock
         if self.frame >= self.next_beat:
