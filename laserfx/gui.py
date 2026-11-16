@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import os
 import sys
+import time
 import tkinter as tk
 from tkinter import filedialog, messagebox
 
@@ -50,6 +51,8 @@ class App:
         self.devs = self._input_devices()
         self.dev_idx = self.devs[0][0] if self.devs else None
         self.play = True
+        self._last_snap = None
+        self._last_hud_t = 0.0
         self._build()
         self._layout(1100, 700)
         self.canvas.bind("<Configure>", lambda e: self._layout(e.width / k, e.height / k))
@@ -77,10 +80,10 @@ class App:
 
         # right: tabs + body card + actions
         self.tabs = Segmented(u, [("setup", "Setup"), ("look", "Look"), ("scanner", "Scanner")],
-                              lambda: self.tab, lambda v: setattr(self, "tab", v), self._tab_changed)
+                             lambda: self.tab, lambda v: setattr(self, "tab", v), self._tab_changed)
         self.body = Card(u)
         self.setup = []
-        reg = lambda lst, w: (lst.append(w), w)[1]                       # noqa: E731
+        reg = lambda lst, w: (lst.append(w), w)[1]                        # noqa: E731
         T = self.setup
         self.cap_src = reg(T, Label(u, "SOURCE", "tiny", C["dim"]))
         self.seg_src = reg(T, Segmented(u, [("file", "Audio file"), ("live", "Live input")], lambda: self.src_mode,
@@ -276,10 +279,12 @@ class App:
         except Exception as e:  # noqa: BLE001
             messagebox.showerror("Could not start", str(e))
             return
+        self._last_snap = None
         self.btn_start.set("Stop", "danger")
         self.status.set("Live · Helios" if kind == "helios" else "Running · preview", C["ok"] if kind != "helios" else C["danger"])
 
     def _set_idle(self):
+        self._last_snap = None
         self.btn_start.set("Start", "success")
         self.status.set("Idle", C["dim"])
         self.section.set("IDLE", C["dim"])
@@ -300,20 +305,27 @@ class App:
             if ses.error:
                 self.status.set("Error", C["danger"])
                 messagebox.showerror("Output stopped", ses.error)
-        if snap is not None and ses.running:
+        if snap is not None and ses.running and snap is not self._last_snap:
+            self._last_snap = snap
             f, s = snap.feats, self.settings
-            self.bpm.set(f"{f.bpm:.1f}" if f.locked else "…")
-            self.section.set(f.section, SECTION_COLORS.get(f.section, C["dim"]))
-            self.beats.set(f.bar_pos if f.locked else -1, f.beat_pulse)
-            for n, m in self.meters.items():
-                m.set(getattr(f, n))
-            self.timeline.set(snap.log, f.time)
             n = max(1, len(snap.frame))
             hdr = f"{snap.scene or '–'}   ·   {n} pts   ·   {s.pps / n:.0f} fps"
             if snap.tripped:
                 hdr += "   ·   static-beam guard"
+            # Render laser preview at full ~120 FPS
             self.preview.update(snap.frame, hdr, s.blackout)
-        self.root.after(33, self._tick)
+
+            # Throttle meters/timeline/BPM to ~20 Hz so canvas redraws stay fast
+            now = time.perf_counter()
+            if now - self._last_hud_t >= 0.05:
+                self._last_hud_t = now
+                self.bpm.set(f"{f.bpm:.1f}" if f.locked else "…")
+                self.section.set(f.section, SECTION_COLORS.get(f.section, C["dim"]))
+                self.beats.set(f.bar_pos if f.locked else -1, f.beat_pulse)
+                for name, m in self.meters.items():
+                    m.set(getattr(f, name))
+                self.timeline.set(snap.log, f.time)
+        self.root.after(8, self._tick)
 
 
 def main():
