@@ -1,6 +1,7 @@
-"""Laser effects: split-direction sweeps, half-length planes, 2x/0.5x BPM sweeps, white hot-dot fans,
-fast drop strobing, BPM-locked 8/16-beat rhythmic pattern swaps (1-1-1-2, 1-2-1-2, 1-1-2-2),
-smooth preset morphing, and secondary beat-synced modifiers.
+"""Laser effects: slow atmospheric Liquid Sky breakdowns with white depth dots & 1-beat piano/synth
+white accents, 1-2 beat solo white drop impact explosions, full-frame sweeps, BPM-locked 8/16-beat
+effect swaps AND colour swaps (1-1-1-2, 1-2-1-2, 1-1-2-2), smooth preset morphing, and secondary
+beat-synced modifiers.
 
 Coordinates are in [-1, 1]; colours are RGB in 0..1.
 Designed for a single output feeding twin projectors where Projector 2 is X-mirrored (x -> -x).
@@ -39,6 +40,18 @@ def hot_dot(pt, rgb=WHITE, dwell=4):
     x, y = float(pt[0]), float(pt[1])
     x2 = min(x + 0.008, 0.98) if x < 0.96 else x - 0.008
     return Path(np.array([[x, y], [x2, y]], float), rgb, dwell)
+
+
+def line_with_dots(a, b, rgb, n_dots=4, dot_rgb=WHITE, dwell=2, dot_dwell=3):
+    """Draws a continuous laser plane with subtle white accent dots distributed along its length for depth."""
+    a_arr = np.asarray(a, dtype=float)
+    b_arr = np.asarray(b, dtype=float)
+    out = [line(a_arr, b_arr, rgb, dwell=dwell)]
+    for i in range(n_dots):
+        t = (i + 0.5) / max(n_dots, 1)
+        pt = a_arr + (b_arr - a_arr) * t
+        out.append(hot_dot(pt, dot_rgb, dwell=dot_dwell))
+    return out
 
 
 def dotted_line(a, b, rgb, dots=5, dot_len=0.035, phase=0.0):
@@ -195,14 +208,159 @@ class Ctx:
         return int(round(lo + (hi - lo) * min(max(self.detail * x, 0.0), 1.0)))
 
     def palette(self, idx: int = 0, v: float = 1.0, white_boost: float = 0.0):
-        p_idx = int(abs(self.hue * 10)) % len(PALETTES)
+        p_idx = int(round(abs(self.hue * 10))) % len(PALETTES)
         h_pri, h_acc, s_acc = PALETTES[p_idx]
         if idx % 2 == 0:
             return hsv(h_pri, max(1.0 - white_boost, 0.0), v)
         return hsv(h_acc, max(s_acc - white_boost, 0.0), v)
 
 
-# ======================================================================== SCENES
+# ======================================================================== DROP OPENING EXPLOSION (FIRST 1-2 BEATS)
+
+def _drop_white_explosion(c: Ctx, progress: float) -> list[Path]:
+    """Solo pure-white explosion of aerial dots and radial burst lines on the first 1-2 beats of a drop."""
+    fade = max(0.0, 1.0 - 0.35 * progress)
+    col_main = WHITE * fade
+    col_soft = WHITE * (0.65 * fade)
+
+    out = []
+    ox, oy = -0.32, -0.10
+    n_rays = c.count(6, 9)
+    spin = 0.35 * progress
+    reach = 0.45 + 1.85 * min(progress * 1.4, 1.0)
+
+    for i in range(n_rays):
+        ang = spin + (i / max(n_rays, 1)) * TAU
+        p0, p1 = ray(ox, oy, ang, reach)
+        if progress < 0.55:
+            out.append(line(*_zig(i, p0, p1), col_main, dwell=2))
+        else:
+            out.extend(dotted_line(p0, p1, col_main, dots=4, dot_len=0.045, phase=progress * 2.0))
+        out.append(hot_dot(p1, WHITE, dwell=4))
+
+    n_dots = c.count(8, 12)
+    r_ring = 0.25 + 0.72 * math.sin(min(progress, 1.0) * math.pi * 0.5)
+    for d in range(n_dots):
+        a = -spin * 1.5 + (d / n_dots) * TAU
+        px = float(np.clip(ox + r_ring * math.cos(a), -0.96, 0.96))
+        py = float(np.clip(oy + r_ring * math.sin(a), -0.96, 0.96))
+        out.append(hot_dot((px, py), col_soft if d % 2 else col_main, dwell=4))
+
+    return out
+
+
+# ======================================================================== ATMOSPHERIC BREAKDOWN SCENES (LOW LINE COUNT)
+
+def sc_liquid_sky_drift(c: Ctx):
+    """Slow, ultra-relaxed Liquid Sky planes (1-2 lines) drifting over 16 beats with white depth dots."""
+    planes = c.count(1, 2)
+    tilt = 0.24 * smooth_wave(c.bt, 16.0)
+    y_base = 0.34 * smooth_wave(c.bt, 32.0)
+    dot_col = WHITE * 0.72
+
+    out = []
+    for p in range(planes):
+        gap = (p - (planes - 1) / 2.0) * 0.26
+        y0 = float(np.clip(y_base + gap - tilt, -0.92, 0.92))
+        y1 = float(np.clip(y_base + gap + tilt, -0.92, 0.92))
+        a, b = _zig(p, (-0.95, y0), (0.95, y1))
+        out.extend(line_with_dots(a, b, c.palette(p, v=0.76), n_dots=4, dot_rgb=dot_col, dwell=1, dot_dwell=3))
+    return out
+
+
+def sc_morphing_plane_sky(c: Ctx):
+    """Two slow sky planes that smoothly morph their angle between horizontal canopy and diagonal V-sky."""
+    morph = 0.5 + 0.5 * smooth_wave(c.bt, 16.0)
+    y_center = 0.26 + 0.18 * smooth_wave(c.bt, 24.0)
+    tilt = 0.42 * morph
+    dot_col = WHITE * 0.75
+
+    p0_a = (-0.95, float(np.clip(y_center - tilt, -0.92, 0.92)))
+    p0_b = (0.95, float(np.clip(y_center + tilt, -0.92, 0.92)))
+    p1_a = (-0.95, float(np.clip(y_center + tilt * 0.75 - 0.18, -0.92, 0.92)))
+    p1_b = (0.95, float(np.clip(y_center - tilt * 0.75 - 0.18, -0.92, 0.92)))
+
+    out = []
+    out.extend(line_with_dots(p0_a, p0_b, c.palette(0, v=0.78), n_dots=5, dot_rgb=dot_col, dwell=1, dot_dwell=3))
+    if c.detail >= 0.35:
+        out.extend(line_with_dots(p1_b, p1_a, c.palette(1, v=0.72), n_dots=4, dot_rgb=dot_col, dwell=1, dot_dwell=3))
+    return out
+
+
+def sc_breathe_horizon_sky(c: Ctx):
+    """Single/dual wide sky sheet that breathes open and closed slowly over 16 beats with white dots."""
+    spread = 0.08 + 0.24 * (0.5 + 0.5 * smooth_wave(c.bt, 16.0))
+    y_mid = 0.28 + 0.16 * smooth_wave(c.bt, 32.0)
+    rock = 0.14 * smooth_wave(c.bt, 12.0)
+    dot_col = WHITE * 0.70
+
+    out = []
+    for idx, sign in enumerate((-1.0, 1.0)):
+        if idx == 1 and c.detail < 0.3:
+            break
+        y0 = float(np.clip(y_mid + sign * spread - rock, -0.92, 0.92))
+        y1 = float(np.clip(y_mid + sign * spread + rock, -0.92, 0.92))
+        a, b = _zig(idx, (-0.95, y0), (0.95, y1))
+        out.extend(line_with_dots(a, b, c.palette(idx, v=0.75), n_dots=4, dot_rgb=dot_col, dwell=1, dot_dwell=3))
+    return out
+
+
+def sc_velvet_sky_sweep(c: Ctx):
+    """Ultra-slow vertical sheet (2 lines) drifting across the room over 8 beats with white depth points."""
+    u = beat_sweep(c.bt, beats_per_pass=8.0, alternate=True)
+    x_center = -0.82 + 1.64 * u
+    blades = c.count(1, 2)
+    width = 0.20 + 0.08 * smooth_wave(c.bt, 16.0)
+    dot_col = WHITE * 0.70
+
+    out = []
+    for i in range(blades):
+        off = (i - (blades - 1) / 2.0) * width
+        x = float(np.clip(x_center + off, -0.94, 0.94))
+        a, b = _zig(i, (x, -0.92), (x, 0.92))
+        out.extend(line_with_dots(a, b, c.palette(i % 2, v=0.74), n_dots=4, dot_rgb=dot_col, dwell=1, dot_dwell=3))
+    return out
+
+
+def sc_silk_wave_sky(c: Ctx):
+    """Single slow undulating sky ribbon with white accent pearls along the crest."""
+    x = np.linspace(-0.94, 0.94, 48)
+    ph = c.bt * TAU / 16.0
+    y = np.clip(0.32 + 0.16 * smooth_wave(c.bt, 24.0) + 0.15 * np.sin(1.6 * math.pi * x + ph), -0.92, 0.92)
+    pts = np.stack([x, y], 1)
+    out = [Path(pts, c.palette(0, v=0.76), dwell=0)]
+    dot_col = WHITE * 0.72
+    for idx in (8, 18, 29, 39):
+        out.append(hot_dot(pts[idx], dot_col, dwell=3))
+    return out
+
+
+def _apply_synth_accent(paths: list[Path], age_beats: float, kind: int, c: Ctx) -> list[Path]:
+    """Subtle 1-beat white accent line or micro-burst triggered by piano chords / synth plucks in breakdowns."""
+    if age_beats < 0.0 or age_beats >= 1.0:
+        return paths
+    env = math.sin(min(age_beats * 4.0, 1.0) * math.pi * 0.5) * ((1.0 - age_beats) ** 1.4)
+    if env <= 0.03:
+        return paths
+    col = WHITE * (0.68 * env)
+
+    if kind % 2 == 0:
+        y = 0.18 + 0.36 * age_beats
+        tilt = 0.16 * (1.0 if kind % 4 == 0 else -1.0)
+        return paths + line_with_dots((-0.92, y - tilt), (0.92, y + tilt), col, n_dots=3, dot_rgb=col, dwell=1, dot_dwell=2)
+    else:
+        ox, oy = -0.38, 0.34
+        r = 0.08 + 0.28 * age_beats
+        burst = []
+        for k in range(4):
+            a = (k / 4.0) * TAU + age_beats * 0.8
+            px = float(np.clip(ox + r * math.cos(a), -0.94, 0.94))
+            py = float(np.clip(oy + r * 0.7 * math.sin(a), -0.94, 0.94))
+            burst.append(hot_dot((px, py), col, dwell=3))
+        return paths + burst
+
+
+# ======================================================================== MAIN & DROP SCENES
 
 def sc_split_direction_sweep(c: Ctx):
     """Upper and lower halves sweep in OPPOSITE directions across the entire width on every beat."""
@@ -523,53 +681,7 @@ def sc_drop_x_blades(c: Ctx):
     return out
 
 
-def sc_sky_canopy(c: Ctx):
-    """Ultra-smooth 16-beat overhead canopy sweep with white tip dots."""
-    v = 0.72 + 0.25 * c.energy
-    n = c.count(6, 9)
-    aim = 0.28 + 0.42 * smooth_wave(c.bt, 16.0)
-    spread = 0.46 + 0.18 * smooth_wave(c.bt, 8.0)
-
-    out = []
-    for i in range(n):
-        u = (i / max(n - 1, 1)) - 0.5
-        ang = aim + u * 2.0 * spread
-        p0, p1 = ray(-0.62, -0.96, ang, 2.25)
-        out.append(line(*_zig(i, p0, p1), c.palette(i % 2, v=v), dwell=1))
-        if i % 2 == 0:
-            out.append(hot_dot(p1, WHITE, dwell=3))
-    return out
-
-
-def sc_slow_horizon_drift(c: Ctx):
-    """Slowly raising and lowering dual Liquid Sky planes that drift over 16 beats."""
-    planes = c.count(2, 4)
-    tilt = 0.28 * smooth_wave(c.bt, 16.0)
-    y_base = 0.38 * smooth_wave(c.bt, 32.0)
-
-    out = []
-    for p in range(planes):
-        gap = (p - (planes - 1) / 2.0) * 0.22
-        y0 = float(np.clip(y_base + gap - tilt, -0.94, 0.94))
-        y1 = float(np.clip(y_base + gap + tilt, -0.94, 0.94))
-        col = c.palette(p, v=0.85)
-        out.append(line(*_zig(p, (-0.96, y0), (0.96, y1)), col, dwell=2))
-    return out
-
-
-def sc_velvet_curtain(c: Ctx):
-    """Wide vertical laser sheet sweeping slowly across the full width over 4 beats."""
-    u = beat_sweep(c.bt, beats_per_pass=4.0, alternate=True)
-    x_center = -0.88 + 1.76 * u
-    blades = c.count(3, 5)
-    width = 0.16 + 0.08 * smooth_wave(c.bt, 8.0)
-    out = []
-    for i in range(blades):
-        off = (i / max(blades - 1, 1) - 0.5) * width
-        x = float(np.clip(x_center + off, -0.95, 0.95))
-        out.append(line(*_zig(i, (x, -0.95), (x, 0.95)), c.palette(i % 2, v=0.78), dwell=1))
-    return out
-
+# ======================================================================== BUILD SECTION SCENES
 
 def sc_build_converge_sweep(c: Ctx):
     """Smoothly accelerating dotted fan sweep that narrows into a bright center beam at the drop."""
@@ -739,6 +851,13 @@ def _morph_paths(prev_paths: list[Path], next_paths: list[Path], alpha: float) -
 
 
 SCENES = {
+    # Atmospheric Breakdown Liquid Sky & Morphing Sky presets
+    "liquid_sky_drift": sc_liquid_sky_drift,
+    "morphing_plane_sky": sc_morphing_plane_sky,
+    "breathe_horizon_sky": sc_breathe_horizon_sky,
+    "velvet_sky_sweep": sc_velvet_sky_sweep,
+    "silk_wave_sky": sc_silk_wave_sky,
+    # Main & Drop presets
     "split_direction_sweep": sc_split_direction_sweep,
     "half_plane_stagger": sc_half_plane_stagger,
     "double_time_whip": sc_double_time_whip,
@@ -753,9 +872,7 @@ SCENES = {
     "random_multi_blade": sc_random_multi_blade,
     "twin_scissor_sweep": sc_twin_scissor_sweep,
     "drop_x_blades": sc_drop_x_blades,
-    "sky_canopy": sc_sky_canopy,
-    "slow_horizon_drift": sc_slow_horizon_drift,
-    "velvet_curtain": sc_velvet_curtain,
+    # Build presets
     "build_converge_sweep": sc_build_converge_sweep,
     "build_rising_sheet": sc_build_rising_sheet,
     "build_prism_tighten": sc_build_prism_tighten,
@@ -768,15 +885,15 @@ SCENES = {
     "lissajous": sc_split_direction_sweep,
     "scope": sc_dot_matrix_sweep,
     "spiral": sc_half_plane_stagger,
-    "spiral_slow": sc_velvet_curtain,
+    "spiral_slow": sc_velvet_sky_sweep,
     "grid": sc_half_plane_stagger,
     "drop_blast": sc_drop_hyper_strobe,
-    "breath": sc_half_time_glide,
+    "breath": sc_breathe_horizon_sky,
     "riser": sc_build_prism_tighten,
     "ring_pulse": sc_full_width_wall,
-    "sky_fan": sc_sky_canopy,
-    "sky_cross": sc_slow_horizon_drift,
-    "scan_sweep": sc_dot_matrix_sweep,
+    "sky_fan": sc_morphing_plane_sky,
+    "sky_cross": sc_liquid_sky_drift,
+    "scan_sweep": sc_silk_wave_sky,
     "build_fan": sc_build_converge_sweep,
     "build_scan": sc_build_rising_sheet,
     "strobe_poly": sc_drop_hyper_strobe,
@@ -807,11 +924,11 @@ POOLS = {
         "drop_x_blades",
     ],
     BREAKDOWN: [
-        "half_time_glide",
-        "dotted_fan_burst",
-        "velvet_curtain",
-        "slow_horizon_drift",
-        "sky_canopy",
+        "liquid_sky_drift",
+        "morphing_plane_sky",
+        "breathe_horizon_sky",
+        "velvet_sky_sweep",
+        "silk_wave_sky",
     ],
     BUILD: [
         "build_prism_tighten",
@@ -824,12 +941,12 @@ POOLS = {
 MODIFIER_POOLS = {
     MAIN: ["white_tip_dots", "beat_rotate", "stereo_pan_shift", "kick_zoom_pump", "counter_sweep_plane", "hat_packet_chop"],
     DROP: ["fast_strobe_16th", "white_tip_dots", "beat_rotate", "counter_sweep_plane", "hat_packet_chop"],
-    BREAKDOWN: ["white_tip_dots", "beat_rotate", "stereo_pan_shift"],
+    BREAKDOWN: ["stereo_pan_shift"],
     BUILD: ["white_tip_dots", "kick_zoom_pump"],
     SILENCE: [],
 }
 
-# BPM-locked rhythmic pattern-swap sequences (1 = primary scene, 2 = partner scene)
+# BPM-locked rhythmic swap sequences (1 = primary scene/colour, 2 = partner scene/colour)
 SWAP_SEQUENCES: dict[str, tuple[int, ...]] = {
     "1-1-1-2": (1, 1, 1, 2),
     "1-2-1-2": (1, 2, 1, 2),
@@ -843,22 +960,35 @@ SWAP_SEQ_NAMES = list(SWAP_SEQUENCES.keys())
 BARS_PER_SCENE = {MAIN: 4, DROP: 2, BREAKDOWN: 4, BUILD: 2, SILENCE: 99}
 MORPH_BEATS = 1.5
 SWAP_MORPH_BEATS = 0.25
+DROP_IMPACT_BEATS = 1.5
 
 
 class FXEngine:
-    """Switches scenes every 8 or 16 beats with BPM-locked pattern swap sequences (e.g. 1-1-1-2, 1-2-1-2, 1-1-2-2),
-    smooth morph transitions, and a secondary modifier layer."""
+    """Switches scenes every 8 or 16 beats with BPM-locked effect swaps OR colour swaps (1-1-1-2, 1-2-1-2,
+    1-1-2-2), 1-2 beat white drop impact explosions, 1-beat piano/synth white breakdown accents, smooth morph
+    transitions, and a secondary modifier layer."""
 
     def __init__(self, seed=1, force_scene=None):
         self.rng = np.random.default_rng(seed)
         self.force = force_scene
         self.section, self.scene, self.prev_scene = None, None, None
+        self.swap_mode: str | None = None          # "effect", "color", or None
         self.swap_scene: str | None = None
+        self.swap_hue_offset: float = 0.2
         self.swap_seq_name: str | None = None
         self.swap_beats_total: int = 0
         self._swap_start_beat: int = 0
         self._active_slot: int = 1
         self._slot_morph_left: float = 0.0
+
+        # Drop impact white explosion timer
+        self._drop_impact_left: float = 0.0
+
+        # Piano/synth melodic onset detector for 1-beat white breakdown accents
+        self._melodic_avg: float = 0.0
+        self._prev_melodic: float = 0.0
+        self._synth_accent_age: float = 99.0
+        self._synth_accent_kind: int = 0
 
         self.modifier: str | None = None
         self._morph_left = 0.0
@@ -890,7 +1020,7 @@ class FXEngine:
             self.modifier = None
             return
         pool = MODIFIER_POOLS.get(self.section, [])
-        chance = 0.65 if self.section == DROP else (0.50 if self.section == MAIN else 0.35)
+        chance = 0.65 if self.section == DROP else (0.50 if self.section == MAIN else 0.30)
         if not pool or float(self.rng.random()) > chance:
             self.modifier = None
             return
@@ -902,48 +1032,63 @@ class FXEngine:
         self._mod_bags[self.section] = bag
 
     def _pick_swap_phrase(self, current_beat: int):
-        """Configures an 8- or 16-beat rhythmic pattern-swap phrase (e.g. 1-1-1-2, 1-2-1-2, 1-1-2-2)."""
+        """Configures an 8- or 16-beat BPM-locked EFFECT swap or COLOUR swap phrase (e.g. 1-1-1-2, 1-2-1-2)."""
+        self.swap_mode = None
         self.swap_scene = None
         self.swap_seq_name = None
         self.swap_beats_total = 0
         self._active_slot = 1
         self._slot_morph_left = 0.0
 
-        if self.force or self.section not in (MAIN, DROP, BREAKDOWN):
-            return
-        pool = POOLS.get(self.section, [])
-        if len(pool) < 2:
+        # Keep breakdowns slow and unbroken; run effect/colour swaps in MAIN and DROP
+        if self.section not in (MAIN, DROP):
             return
 
-        swap_chance = 0.65 if self.section == DROP else (0.50 if self.section == MAIN else 0.30)
+        swap_chance = 0.70 if self.section == DROP else 0.55
         if float(self.rng.random()) > swap_chance:
-            return
-
-        partner = self._draw_from_bag(self.section, exclude=self.scene)
-        if not partner or partner == self.scene:
             return
 
         if not self._seq_bag:
             self._seq_bag = list(SWAP_SEQ_NAMES)
             self.rng.shuffle(self._seq_bag)
-        self.swap_seq_name = self._seq_bag.pop(0)
-        self.swap_scene = partner
-        # Duration is 8 beats (2 bars) or 16 beats (4 bars) matching the phrase length
-        self.swap_beats_total = BARS_PER_SCENE[self.section] * 4
-        self._swap_start_beat = current_beat
+        seq_name = self._seq_bag.pop(0)
+
+        # If a specific scene is forced via CLI/GUI, always use colour swapping; otherwise alternate effect vs colour swap
+        use_color_swap = bool(self.force) or (float(self.rng.random()) < 0.50)
+
+        if use_color_swap:
+            self.swap_mode = "color"
+            # Jump by 1, 2, or 3 steps in PALETTES (each step is 0.1) so slot 2 uses a distinct dual-tone palette
+            step = int(self.rng.integers(1, len(PALETTES)))
+            self.swap_hue_offset = step * 0.1
+            self.swap_seq_name = seq_name
+            self.swap_beats_total = BARS_PER_SCENE[self.section] * 4
+            self._swap_start_beat = current_beat
+        else:
+            pool = POOLS.get(self.section, [])
+            if len(pool) < 2:
+                return
+            partner = self._draw_from_bag(self.section, exclude=self.scene)
+            if not partner or partner == self.scene:
+                return
+            self.swap_mode = "effect"
+            self.swap_scene = partner
+            self.swap_seq_name = seq_name
+            self.swap_beats_total = BARS_PER_SCENE[self.section] * 4
+            self._swap_start_beat = current_beat
 
     def _pick(self, current_beat: int = 0):
         self.prev_scene = self.scene
         if self.force:
             self.scene = self.force
-            self.swap_scene = None
-            self.swap_seq_name = None
             self._pick_modifier()
+            self._pick_swap_phrase(current_beat)
             return
 
         self.scene = self._draw_from_bag(self.section, exclude=self.prev_scene)
         if not self.scene:
             self.modifier = None
+            self.swap_mode = None
             self.swap_scene = None
             self.swap_seq_name = None
             return
@@ -957,6 +1102,9 @@ class FXEngine:
         if f.section != self.section:
             self.section, self.bars = f.section, 0
             self._pick(f.beat_count)
+            if f.section == DROP:
+                self._drop_impact_left = DROP_IMPACT_BEATS
+                self._morph_left = 0.0
 
         if f.beat_count != self._last_beat:
             if f.bar_pos == 0:
@@ -967,11 +1115,11 @@ class FXEngine:
                     self._pick(f.beat_count)
             self._last_beat = f.beat_count
 
-        hue = self.hue
+        base_hue = self.hue
         if f.section == DROP:
-            hue = [0.0, 0.1, 0.2, 0.4][(f.beat_count // 16) % 4]
+            base_hue = [0.0, 0.1, 0.2, 0.4][(f.beat_count // 16) % 4]
         elif f.section == BREAKDOWN:
-            hue = 0.0
+            base_hue = 0.0
 
         bt = f.beat_count + f.beat_phase
         dbt = bt - self._last_bt
@@ -982,19 +1130,45 @@ class FXEngine:
                 self._morph_left = max(0.0, self._morph_left - dbt)
             if self._slot_morph_left > 0.0:
                 self._slot_morph_left = max(0.0, self._slot_morph_left - dbt)
+            if self._drop_impact_left > 0.0:
+                self._drop_impact_left = max(0.0, self._drop_impact_left - dbt)
+            self._synth_accent_age += dbt
 
-        c = Ctx(f, bt, hue, self.rng, rt=self.rt, strobe=self.strobe_enabled, detail=self.detail)
+        # Detect piano / synth chord or pluck transients during BREAKDOWN for 1-beat subtle white accent
+        melodic = 0.65 * f.mid + 0.35 * f.high + 0.25 * getattr(f, "snare", 0.0)
+        self._melodic_avg = 0.92 * self._melodic_avg + 0.08 * melodic
+        if (
+            f.section == BREAKDOWN
+            and self._synth_accent_age > 1.25
+            and melodic > max(self._melodic_avg * 1.18, 0.28)
+            and melodic > self._prev_melodic + 0.03
+        ):
+            self._synth_accent_age = 0.0
+            self._synth_accent_kind += 1
+        self._prev_melodic = melodic
+
         if not self.scene or f.section == SILENCE:
             return [], None
 
-        # Evaluate active scene (with BPM-locked pattern swap if active for this 8/16-beat phrase)
+        # First 1-2 beats of DROP: solo pure-white dot/line explosion before switching into regular patterns
+        if f.section == DROP and self._drop_impact_left > 0.0:
+            c_drop = Ctx(f, bt, base_hue, self.rng, rt=self.rt, strobe=self.strobe_enabled, detail=self.detail)
+            progress = 1.0 - (self._drop_impact_left / DROP_IMPACT_BEATS)
+            paths = _drop_white_explosion(c_drop, progress)
+            if progress > 0.75:
+                blend = (progress - 0.75) / 0.25
+                paths = _morph_paths(paths, SCENES[self.scene](c_drop), blend)
+            return paths, "drop_white_explosion"
+
+        # Evaluate BPM-locked swap phrase (either "effect" swap or "color" swap)
         elapsed_beats = f.beat_count - self._swap_start_beat
         swap_active = (
-            self.swap_scene is not None
+            self.swap_mode is not None
             and self.swap_seq_name in SWAP_SEQUENCES
             and 0 <= elapsed_beats < self.swap_beats_total
         )
 
+        active_hue = base_hue
         if swap_active:
             seq = SWAP_SEQUENCES[self.swap_seq_name]
             slot = seq[elapsed_beats % len(seq)]
@@ -1002,13 +1176,25 @@ class FXEngine:
                 self._active_slot = slot
                 self._slot_morph_left = SWAP_MORPH_BEATS
 
-            primary_name = self.scene if slot == 1 else self.swap_scene
-            other_name = self.swap_scene if slot == 1 else self.scene
-            paths = SCENES[primary_name](c)
-            if self._slot_morph_left > 0.0 and other_name in SCENES:
-                alpha = 1.0 - (self._slot_morph_left / SWAP_MORPH_BEATS)
-                paths = _morph_paths(SCENES[other_name](c), paths, alpha)
+            if self.swap_mode == "color":
+                active_hue = base_hue if slot == 1 else (base_hue + self.swap_hue_offset)
+                c = Ctx(f, bt, active_hue, self.rng, rt=self.rt, strobe=self.strobe_enabled, detail=self.detail)
+                paths = SCENES[self.scene](c)
+                if self._slot_morph_left > 0.0:
+                    prev_hue = (base_hue + self.swap_hue_offset) if slot == 1 else base_hue
+                    c_prev = Ctx(f, bt, prev_hue, self.rng, rt=self.rt, strobe=self.strobe_enabled, detail=self.detail)
+                    alpha = 1.0 - (self._slot_morph_left / SWAP_MORPH_BEATS)
+                    paths = _morph_paths(SCENES[self.scene](c_prev), paths, alpha)
+            else:  # self.swap_mode == "effect"
+                c = Ctx(f, bt, base_hue, self.rng, rt=self.rt, strobe=self.strobe_enabled, detail=self.detail)
+                primary_name = self.scene if slot == 1 else self.swap_scene
+                other_name = self.swap_scene if slot == 1 else self.scene
+                paths = SCENES[primary_name](c)
+                if self._slot_morph_left > 0.0 and other_name in SCENES:
+                    alpha = 1.0 - (self._slot_morph_left / SWAP_MORPH_BEATS)
+                    paths = _morph_paths(SCENES[other_name](c), paths, alpha)
         else:
+            c = Ctx(f, bt, base_hue, self.rng, rt=self.rt, strobe=self.strobe_enabled, detail=self.detail)
             paths = SCENES[self.scene](c)
 
         # Phrase-boundary smooth morph from previous scene
@@ -1019,7 +1205,17 @@ class FXEngine:
 
         paths = _apply_modifier(paths, self.modifier, c)
 
-        label = f"{self.scene}<>{self.swap_scene} [{self.swap_seq_name}]" if swap_active else self.scene
+        # Add subtle 1-beat white accent line or dot burst on piano/synth hits during BREAKDOWN
+        if f.section == BREAKDOWN and self._synth_accent_age < 1.0:
+            paths = _apply_synth_accent(paths, self._synth_accent_age, self._synth_accent_kind, c)
+
+        if swap_active and self.swap_mode == "effect":
+            label = f"{self.scene}<>{self.swap_scene} [{self.swap_seq_name}]"
+        elif swap_active and self.swap_mode == "color":
+            label = f"{self.scene} [color {self.swap_seq_name}]"
+        else:
+            label = self.scene
+
         if self.modifier:
             label = f"{label}+{self.modifier}"
         return paths, label
