@@ -12,7 +12,7 @@ from .audio import BREAKDOWN, BUILD, DROP, MAIN, SILENCE
 from .fx import SCENES
 from .session import Session, Settings
 from .ui import (C, UI, W, BeatDots, Button, Card, Chip, Dropdown, Label, Meter, Pill, Preview, Segmented, Slider,
-                 Stepper, Timeline, Toggle, mix)
+                 Stepper, Timeline, Toggle)
 
 SECTION_COLORS = {MAIN: "#3b82f6", BREAKDOWN: "#8b5cf6", BUILD: "#f59e0b", DROP: "#ef4444", SILENCE: "#475569"}
 RW = 392            # right column width
@@ -40,8 +40,8 @@ class App:
         self.root = root
         root.title("LaserFX")
         root.configure(bg=C["bg"])
-        root.minsize(1040, 720)
-        self.canvas = tk.Canvas(root, bg=C["bg"], highlightthickness=0, bd=0, width=1100, height=760)
+        root.minsize(1040, 740)
+        self.canvas = tk.Canvas(root, bg=C["bg"], highlightthickness=0, bd=0, width=1100, height=780)
         self.canvas.pack(fill="both", expand=True)
         self.ui = UI(root, self.canvas, k)
         self.settings = Settings()
@@ -54,12 +54,18 @@ class App:
         self._last_snap = None
         self._last_hud_t = 0.0
         self._build()
-        self._layout(1100, 760)
+        self._layout(1100, 780)
         self.canvas.bind("<Configure>", lambda e: self._layout(e.width / k, e.height / k))
         root.bind("<space>", lambda e: self._toggle_blackout())
-        root.bind("<Escape>", lambda e: self._toggle_blackout())
+        root.bind("<Escape>", lambda e: self._on_escape())
         root.protocol("WM_DELETE_WINDOW", self._close)
         self._tick()
+
+    def _on_escape(self):
+        if self.ui.active_dropdown is not None:
+            self.ui.active_dropdown.close()
+        else:
+            self._toggle_blackout()
 
     # ----------------------------------------------------------------- build
     def _build(self):
@@ -118,13 +124,15 @@ class App:
         self.st_pts = reg(S, Stepper(u, "Points per frame", lambda: s.points, lambda v: (setattr(s, "points", int(v)), self._fps()),
                                      50, 100, 3000, "{:,}"))
         self.fps_lbl = reg(S, Label(u, "", "mid", C["ok"], "w"))
-        self.cap_galvo = reg(S, Label(u, "GALVO & COLOR LAG", "tiny", C["dim"]))
+        self.cap_galvo = reg(S, Label(u, "GALVO & CORNER TUNING", "tiny", C["dim"]))
         self.st_lag = reg(S, Stepper(u, "Color shift (galvo lag)", lambda: s.galvo_lag, lambda v: setattr(s, "galvo_lag", int(v)),
-                                     1, -10, 10, "{:+d} pts"))
+                                     1, -12, 12, "{:+d} pts"))
         self.st_dwell = reg(S, Stepper(u, "Corner dwell", lambda: s.corner_dwell, lambda v: setattr(s, "corner_dwell", int(v)),
-                                       1, 0, 6, "{:d} pts"))
+                                       1, 0, 12, "{:d} pts"))
         self.st_blank = reg(S, Stepper(u, "Blanking delay", lambda: s.blank_delay, lambda v: setattr(s, "blank_delay", int(v)),
-                                       1, 0, 6, "{:d} pts"))
+                                       1, 0, 12, "{:d} pts"))
+        self.sl_brake = reg(S, Slider(u, "Corner deceleration", 0.0, 1.0, lambda: s.corner_brake,
+                                      lambda v: setattr(s, "corner_brake", v), "{:.0%}"))
         self.cap_flip = reg(S, Label(u, "ORIENTATION", "tiny", C["dim"]))
         self.chips_flip = [reg(S, Chip(u, t, lambda n=n: getattr(s, n), lambda v, n=n: setattr(s, n, v)))
                            for t, n in (("Flip X", "flip_x"), ("Flip Y", "flip_y"), ("Swap X/Y", "swap_xy"))]
@@ -184,20 +192,23 @@ class App:
         self.look[5].place(ix, y + 280, iw, 40)
 
         # scanner tab
-        y = by + 14
-        self.st_pps.place(ix, y, iw, 34)
-        self.st_pts.place(ix, y + 40, iw, 34)
-        self.fps_lbl.place(ix, y + 80, iw, 20)
-        self.cap_galvo.place(ix, y + 110, iw, 12)
-        self.st_lag.place(ix, y + 126, iw, 34)
-        self.st_dwell.place(ix, y + 166, iw, 34)
-        self.st_blank.place(ix, y + 206, iw, 34)
-        self.cap_flip.place(ix, y + 252, iw, 12)
+        y = by + 12
+        self.st_pps.place(ix, y, iw, 32)
+        self.st_pts.place(ix, y + 36, iw, 32)
+        self.fps_lbl.place(ix, y + 72, iw, 18)
+        self.cap_galvo.place(ix, y + 98, iw, 12)
+        self.st_lag.place(ix, y + 114, iw, 32)
+        self.st_dwell.place(ix, y + 150, iw, 32)
+        self.st_blank.place(ix, y + 186, iw, 32)
+        self.sl_brake.place(ix, y + 224, iw, 42)
+        self.cap_flip.place(ix, y + 276, iw, 12)
         for i, c in enumerate(self.chips_flip):
-            c.place(ix + i * 112, y + 270, 104, 32)
+            c.place(ix + i * 112, y + 292, 104, 30)
         self._apply_visibility()
 
     def _apply_visibility(self):
+        if self.ui.active_dropdown is not None:
+            self.ui.active_dropdown.close()
         for w in self.setup:
             w.visible = self.tab == "setup"
         for w in self.look:
@@ -302,6 +313,8 @@ class App:
 
     def _close(self):
         try:
+            if self.ui.active_dropdown is not None:
+                self.ui.active_dropdown.close()
             self.session.stop()
         finally:
             self.root.destroy()
@@ -347,7 +360,7 @@ def main():
         k = min(max(root.winfo_fpixels("1i") / 96.0, 1.0), 2.5)
     except Exception:  # noqa: BLE001
         k = 1.0
-    root.geometry(f"{int(1100 * k)}x{int(760 * k)}")
+    root.geometry(f"{int(1100 * k)}x{int(780 * k)}")
     App(root, k)
     root.mainloop()
 

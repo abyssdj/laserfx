@@ -1,5 +1,5 @@
-"""Laser effects: clean, sharp beam paths with safe duplicate removal,
-high-FPS sub-frame beat interpolation, and atmospheric Liquid Sky breakdowns.
+"""Laser effects: coherent, sharp aerial beam geometry, clean single-vector planes,
+smooth RGB-safe morphing, and high-FPS sub-frame beat interpolation.
 
 Coordinates are in [-1, 1]; colours are RGB in 0..1.
 Designed for a single output feeding twin projectors where Projector 2 is X-mirrored (x -> -x).
@@ -17,6 +17,7 @@ from .audio import BREAKDOWN, BUILD, DROP, MAIN, SILENCE, Features
 
 TAU = 2 * math.pi
 WHITE = np.array([1.0, 1.0, 1.0], dtype=float)
+LIM = 0.94  # uniform scan boundary so all corners and sweeps share clean margins
 
 
 @dataclass
@@ -35,26 +36,15 @@ def line(a, b, rgb, dwell=0):
 
 
 def hot_dot(pt, rgb=WHITE, dwell=1):
-    """Creates a crisp aerial laser point with minimal overhead."""
-    x, y = float(pt[0]), float(pt[1])
-    x2 = min(x + 0.008, 0.98) if x < 0.96 else x - 0.008
+    """Creates a crisp stationary aerial laser pip."""
+    x = float(np.clip(pt[0], -LIM, LIM))
+    y = float(np.clip(pt[1], -LIM, LIM))
+    x2 = min(x + 0.008, LIM) if x < (LIM - 0.02) else x - 0.008
     return Path(np.array([[x, y], [x2, y]], float), rgb, dwell)
 
 
-def line_with_dots(a, b, rgb, n_dots=2, dot_rgb=WHITE, dwell=0, dot_dwell=1):
-    """Draws a sharp beam with subtle endpoint/anchor dots."""
-    a_arr = np.asarray(a, dtype=float)
-    b_arr = np.asarray(b, dtype=float)
-    out = [line(a_arr, b_arr, rgb, dwell=dwell)]
-    if n_dots >= 1:
-        out.append(hot_dot(b_arr, dot_rgb, dwell=dot_dwell))
-    if n_dots >= 2:
-        out.append(hot_dot(a_arr, dot_rgb, dwell=dot_dwell))
-    return out
-
-
 def dotted_line(a, b, rgb, dots=5, dot_len=0.04, phase=0.0):
-    """Renders a clean, well-spaced series of crisp aerial laser pips."""
+    """Renders a clean, well-spaced series of crisp aerial laser pips along segment a -> b."""
     a = np.asarray(a, dtype=float)
     b = np.asarray(b, dtype=float)
     vec = b - a
@@ -94,21 +84,22 @@ def dashed_beam(a, b, rgb, segments=3, duty=0.64, phase=0.0):
     return out
 
 
-def ray(ox, oy, ang, length=2.6):
-    """Ray from (ox, oy) at `ang` (0 = straight up), clipped cleanly to [-1, 1]."""
+def ray(ox, oy, ang, length=2.6, bound=LIM):
+    """Ray from (ox, oy) at `ang` (0 = straight up), clipped cleanly to [-bound, bound]."""
     dx, dy, t = math.sin(ang), math.cos(ang), length
     if dx > 1e-9:
-        t = min(t, (1.0 - ox) / dx)
+        t = min(t, (bound - ox) / dx)
     elif dx < -1e-9:
-        t = min(t, (-1.0 - ox) / dx)
+        t = min(t, (-bound - ox) / dx)
     if dy > 1e-9:
-        t = min(t, (1.0 - oy) / dy)
+        t = min(t, (bound - oy) / dy)
     elif dy < -1e-9:
-        t = min(t, (-1.0 - oy) / dy)
+        t = min(t, (-bound - oy) / dy)
+    t = max(t, 0.02)
     return (ox, oy), (ox + dx * t, oy + dy * t)
 
 
-def clipped_plane(cx: float, cy: float, angle: float, span: float = 0.96):
+def clipped_plane(cx: float, cy: float, angle: float, span: float = LIM):
     """Full-span laser plane passing through (cx, cy) perpendicular to `angle`, clipped to [-span, span]."""
     nx, ny = math.cos(angle), math.sin(angle)
     tx, ty = -ny, nx
@@ -126,8 +117,8 @@ def clipped_plane(cx: float, cy: float, angle: float, span: float = 0.96):
     return (cx + tx * t_min, cy + ty * t_min), (cx + tx * t_max, cy + ty * t_max)
 
 
-def _dedupe_exact_lines(paths: list[Path], tol: float = 0.035) -> list[Path]:
-    """Removes only true duplicate/near-identical overlapping 2-point lines without dropping crossing beams."""
+def _dedupe_exact_lines(paths: list[Path], tol: float = 0.03) -> list[Path]:
+    """Removes only true duplicate overlapping 2-point lines while preserving crossing beams and polygons."""
     kept: list[Path] = []
     sigs: list[tuple[np.ndarray, np.ndarray]] = []
     for p in paths:
@@ -181,7 +172,7 @@ def snare_swell(c: Ctx) -> float:
     return min(max(getattr(c.f, "snare", 0.0), 0.0), 1.0)
 
 
-def strobe_gate(c: Ctx, div: float = 4.0, duty: float = 0.45) -> bool:
+def strobe_gate(c: Ctx, div: float = 4.0, duty: float = 0.48) -> bool:
     return (not c.strobe) or ((c.bt * div) % 1.0) < duty
 
 
@@ -260,18 +251,17 @@ def _drop_impact_effect(c: Ctx, progress: float, variant: int) -> list[Path]:
                 out.append(line(*_zig(i, p0, p1), col_main, dwell=0))
             else:
                 out.extend(dotted_line(p0, p1, col_main, dots=4, dot_len=0.045, phase=progress * 2.0))
-            out.append(hot_dot(p1, WHITE, dwell=1))
 
     elif variant == 1:
         pairs = c.count(2, 3)
         for p in range(pairs):
             frac = (p + 0.5) / pairs
-            y_off = 0.16 + 0.74 * eased * frac
+            y_off = 0.16 + 0.72 * eased * frac
             slant = 0.14 * (1.0 - eased) * (1.0 if p % 2 == 0 else -1.0)
             for sign in (-1.0, 1.0):
-                y0 = float(np.clip(sign * y_off - slant, -0.95, 0.95))
-                y1 = float(np.clip(sign * y_off + slant, -0.95, 0.95))
-                out.append(line((-0.95, y0), (0.95, y1), col_main, dwell=0))
+                y0 = float(np.clip(sign * y_off - slant, -LIM, LIM))
+                y1 = float(np.clip(sign * y_off + slant, -LIM, LIM))
+                out.append(line((-LIM, y0), (LIM, y1), col_main, dwell=0))
 
     elif variant == 2:
         ox, oy = -0.25, 0.05
@@ -280,26 +270,26 @@ def _drop_impact_effect(c: Ctx, progress: float, variant: int) -> list[Path]:
         for arm in range(n_arms):
             base_a = (arm / n_arms) * TAU + progress * 0.9
             for k in range(dots_per_arm):
-                r = (0.18 + 0.88 * eased) * ((k + 1) / dots_per_arm)
+                r = (0.18 + 0.86 * eased) * ((k + 1) / dots_per_arm)
                 a = base_a + k * 0.18 * progress
-                px = float(np.clip(ox + r * math.cos(a), -0.95, 0.95))
-                py = float(np.clip(oy + r * math.sin(a), -0.95, 0.95))
+                px = float(np.clip(ox + r * math.cos(a), -LIM, LIM))
+                py = float(np.clip(oy + r * math.sin(a), -LIM, LIM))
                 out.append(hot_dot((px, py), col_main if k == dots_per_arm - 1 else col_soft, dwell=1))
 
     else:
         u = beat_sweep(progress * 2.0, beats_per_pass=1.0, alternate=True)
-        x_a = -0.90 + 1.80 * u
-        x_b = 0.90 - 1.80 * u
-        y_c = -0.84 + 1.68 * eased
-        out.append(line((x_a, -0.95), (x_a, 0.95), col_main, dwell=0))
-        out.append(line((x_b, 0.95), (x_b, -0.95), col_main, dwell=0))
-        out.append(line((-0.95, y_c), (0.95, y_c), col_soft, dwell=0))
-        out.append(line((0.95, -y_c), (-0.95, -y_c), col_soft, dwell=0))
+        x_a = -0.88 + 1.76 * u
+        x_b = 0.88 - 1.76 * u
+        y_c = -0.82 + 1.64 * eased
+        out.append(line((x_a, -LIM), (x_a, LIM), col_main, dwell=0))
+        out.append(line((x_b, LIM), (x_b, -LIM), col_main, dwell=0))
+        out.append(line((-LIM, y_c), (LIM, y_c), col_soft, dwell=0))
+        out.append(line((LIM, -y_c), (-LIM, -y_c), col_soft, dwell=0))
 
     return out
 
 
-# ======================================================================== ATMOSPHERIC BREAKDOWN SCENES
+# ======================================================================== ATMOSPHERIC BREAKDOWN SCENES (LIQUID SKY)
 
 def sc_liquid_sky_drift(c: Ctx):
     planes = c.count(1, 2)
@@ -308,11 +298,11 @@ def sc_liquid_sky_drift(c: Ctx):
 
     out = []
     for p in range(planes):
-        gap = (p - (planes - 1) / 2.0) * 0.38
-        y0 = float(np.clip(y_base + gap - tilt, -0.92, 0.92))
-        y1 = float(np.clip(y_base + gap + tilt, -0.92, 0.92))
-        a, b = _zig(p, (-0.95, y0), (0.95, y1))
-        out.extend(line_with_dots(a, b, c.palette(p, v=0.80), n_dots=1, dot_rgb=WHITE * 0.72, dwell=0))
+        gap = (p - (planes - 1) / 2.0) * 0.36
+        y0 = float(np.clip(y_base + gap - tilt, -LIM, LIM))
+        y1 = float(np.clip(y_base + gap + tilt, -LIM, LIM))
+        a, b = _zig(p, (-LIM, y0), (LIM, y1))
+        out.append(line(a, b, c.palette(p, v=0.82), dwell=0))
     return out
 
 
@@ -321,14 +311,14 @@ def sc_morphing_plane_sky(c: Ctx):
     y_center = 0.22 + 0.16 * smooth_wave(c.bt, 24.0)
     tilt = 0.36 * morph
 
-    p0_a = (-0.95, float(np.clip(y_center - tilt, -0.92, 0.92)))
-    p0_b = (0.95, float(np.clip(y_center + tilt, -0.92, 0.92)))
-    p1_a = (-0.95, float(np.clip(y_center + tilt * 0.75 - 0.32, -0.92, 0.92)))
-    p1_b = (0.95, float(np.clip(y_center - tilt * 0.75 - 0.32, -0.92, 0.92)))
+    p0_a = (-LIM, float(np.clip(y_center - tilt, -LIM, LIM)))
+    p0_b = (LIM, float(np.clip(y_center + tilt, -LIM, LIM)))
+    p1_a = (-LIM, float(np.clip(y_center + tilt * 0.75 - 0.34, -LIM, LIM)))
+    p1_b = (LIM, float(np.clip(y_center - tilt * 0.75 - 0.34, -LIM, LIM)))
 
-    out = [line(p0_a, p0_b, c.palette(0, v=0.82), dwell=0)]
+    out = [line(p0_a, p0_b, c.palette(0, v=0.84), dwell=0)]
     if c.detail >= 0.35:
-        out.append(line(p1_b, p1_a, c.palette(1, v=0.76), dwell=0))
+        out.append(line(p1_b, p1_a, c.palette(1, v=0.78), dwell=0))
     return out
 
 
@@ -341,10 +331,10 @@ def sc_breathe_horizon_sky(c: Ctx):
     for idx, sign in enumerate((-1.0, 1.0)):
         if idx == 1 and c.detail < 0.3:
             break
-        y0 = float(np.clip(y_mid + sign * spread - rock, -0.92, 0.92))
-        y1 = float(np.clip(y_mid + sign * spread + rock, -0.92, 0.92))
-        a, b = _zig(idx, (-0.95, y0), (0.95, y1))
-        out.append(line(a, b, c.palette(idx, v=0.78), dwell=0))
+        y0 = float(np.clip(y_mid + sign * spread - rock, -LIM, LIM))
+        y1 = float(np.clip(y_mid + sign * spread + rock, -LIM, LIM))
+        a, b = _zig(idx, (-LIM, y0), (LIM, y1))
+        out.append(line(a, b, c.palette(idx, v=0.80), dwell=0))
     return out
 
 
@@ -352,67 +342,66 @@ def sc_velvet_sky_sweep(c: Ctx):
     u = beat_sweep(c.bt, beats_per_pass=8.0, alternate=True)
     x_center = -0.74 + 1.48 * u
     blades = c.count(1, 2)
-    width = 0.32 + 0.10 * smooth_wave(c.bt, 16.0)
+    width = 0.34 + 0.10 * smooth_wave(c.bt, 16.0)
 
     out = []
     for i in range(blades):
         off = (i - (blades - 1) / 2.0) * width
-        x = float(np.clip(x_center + off, -0.94, 0.94))
-        a, b = _zig(i, (x, -0.92), (x, 0.92))
-        out.append(line(a, b, c.palette(i % 2, v=0.78), dwell=0))
+        x = float(np.clip(x_center + off, -LIM, LIM))
+        a, b = _zig(i, (x, -LIM), (x, LIM))
+        out.append(line(a, b, c.palette(i % 2, v=0.80), dwell=0))
     return out
 
 
 def sc_silk_wave_sky(c: Ctx):
-    x = np.linspace(-0.94, 0.94, 24)
+    x = np.linspace(-LIM, LIM, 24)
     ph = c.bt * TAU / 16.0
-    y = np.clip(0.28 + 0.16 * smooth_wave(c.bt, 24.0) + 0.18 * np.sin(1.5 * math.pi * x + ph), -0.92, 0.92)
+    y = np.clip(0.28 + 0.16 * smooth_wave(c.bt, 24.0) + 0.18 * np.sin(1.5 * math.pi * x + ph), -LIM, LIM)
     pts = np.stack([x, y], 1)
-    return [Path(pts, c.palette(0, v=0.80), dwell=0)]
+    return [Path(pts, c.palette(0, v=0.82), dwell=0)]
 
 
 def sc_dual_horizon_mirage(c: Ctx):
     ang = 0.30 * smooth_wave(c.bt, 20.0)
     y_base = 0.24 + 0.12 * smooth_wave(c.bt, 32.0)
     return [
-        line((-0.95, y_base - ang), (0.95, y_base + ang), c.palette(0, v=0.78), dwell=0),
-        line((0.95, y_base - ang * 0.6 - 0.32), (-0.95, y_base + ang * 0.6 - 0.32), c.palette(1, v=0.74), dwell=0),
+        line((-LIM, y_base - ang), (LIM, y_base + ang), c.palette(0, v=0.80), dwell=0),
+        line((LIM, y_base - ang * 0.6 - 0.34), (-LIM, y_base + ang * 0.6 - 0.34), c.palette(1, v=0.76), dwell=0),
     ]
 
 
 def sc_floating_dot_constellation(c: Ctx):
     y_sky = 0.08 + 0.14 * smooth_wave(c.bt, 24.0)
-    out = [line((-0.95, y_sky), (0.95, y_sky), c.palette(0, v=0.72), dwell=0)]
+    out = [line((-LIM, y_sky), (LIM, y_sky), c.palette(0, v=0.74), dwell=0)]
     n_stars = c.count(5, 7)
     for s in range(n_stars):
         u = (s + 0.5) / n_stars
         x = -0.84 + 1.68 * u + 0.06 * math.sin(c.bt * TAU / 16.0 + s)
         y = 0.44 + 0.28 * math.sin(c.bt * TAU / 20.0 + s * 1.7)
-        col = WHITE * 0.82 if s % 2 == 0 else c.palette(1, v=0.82)
-        out.append(hot_dot((float(np.clip(x, -0.94, 0.94)), float(np.clip(y, -0.90, 0.92))), col, dwell=1))
+        col = WHITE * 0.84 if s % 2 == 0 else c.palette(1, v=0.84)
+        out.append(hot_dot((x, y), col, dwell=1))
     return out
 
 
 def sc_slow_v_canopy_sky(c: Ctx):
     y_apex = 0.10 + 0.18 * smooth_wave(c.bt, 24.0)
     wing_lift = 0.30 + 0.24 * smooth_wave(c.bt, 16.0)
-    y_wing = float(np.clip(y_apex + wing_lift, -0.90, 0.92))
-    return [
-        line((-0.95, y_wing), (0.0, y_apex), c.palette(0, v=0.80), dwell=0),
-        line((0.0, y_apex), (0.95, y_wing), c.palette(1, v=0.80), dwell=0),
-    ]
+    y_wing = float(np.clip(y_apex + wing_lift, -LIM, LIM))
+    # Continuous V-polyline for crisp center vertex without blanking jump
+    pts = np.array([[-LIM, y_wing], [0.0, y_apex], [LIM, y_wing]], float)
+    return [Path(pts, c.palette(0, v=0.82), dwell=0)]
 
 
 def sc_aurora_sky_curtain(c: Ctx):
-    x = np.linspace(-0.94, 0.94, 24)
+    x = np.linspace(-LIM, LIM, 24)
     out = []
     for layer in range(c.count(1, 2)):
         ph = c.bt * TAU / 18.0 + layer * 2.1
         y = 0.34 + 0.12 * smooth_wave(c.bt, 28.0) + 0.14 * np.sin(1.4 * math.pi * x + ph) - layer * 0.34
-        pts = np.stack([x, np.clip(y, -0.92, 0.92)], 1)
+        pts = np.stack([x, np.clip(y, -LIM, LIM)], 1)
         if layer == 1:
             pts = pts[::-1]
-        out.append(Path(pts, c.palette(layer, v=0.78), dwell=0))
+        out.append(Path(pts, c.palette(layer, v=0.80), dwell=0))
     return out
 
 
@@ -427,20 +416,18 @@ def _apply_synth_accent(paths: list[Path], age_beats: float, kind: int, c: Ctx) 
     if kind % 2 == 0:
         y = -0.45 + 0.42 * age_beats
         tilt = 0.14 * (1.0 if kind % 4 == 0 else -1.0)
-        return paths + [line((-0.92, y - tilt), (0.92, y + tilt), col, dwell=0)]
+        return paths + [line((-LIM, y - tilt), (LIM, y + tilt), col, dwell=0)]
     else:
         ox, oy = -0.38, -0.34
         r = 0.14 + 0.28 * age_beats
         burst = []
         for k in range(4):
             a = (k / 4.0) * TAU + age_beats * 0.8
-            px = float(np.clip(ox + r * math.cos(a), -0.94, 0.94))
-            py = float(np.clip(oy + r * 0.7 * math.sin(a), -0.94, 0.94))
-            burst.append(hot_dot((px, py), col, dwell=1))
+            burst.append(hot_dot((ox + r * math.cos(a), oy + r * 0.7 * math.sin(a)), col, dwell=1))
         return paths + burst
 
 
-# ======================================================================== MAIN & DROP SCENES
+# ======================================================================== MAIN & DROP SCENES (COHERENT, CRISP GEOMETRY)
 
 def sc_split_direction_sweep(c: Ctx):
     pump = beat_pump(c)
@@ -456,11 +443,11 @@ def sc_split_direction_sweep(c: Ctx):
     idx = 0
     for i in range(blades):
         off = (i - (blades - 1) / 2.0) * gap
-        xt = float(np.clip(x_top + off, -0.95, 0.95))
-        xb = float(np.clip(x_bot + off, -0.95, 0.95))
-        out.append(line(*_zig(idx, (xt, 0.10), (xt, 0.95)), c.palette(0, white_boost=0.70 * pump if i == 0 else 0.0), dwell=0))
+        xt = float(np.clip(x_top + off, -LIM, LIM))
+        xb = float(np.clip(x_bot + off, -LIM, LIM))
+        out.append(line(*_zig(idx, (xt, 0.10), (xt, LIM)), c.palette(0, white_boost=0.70 * pump if i == 0 else 0.0), dwell=0))
         idx += 1
-        out.append(line(*_zig(idx, (xb, -0.95), (xb, -0.10)), c.palette(1, white_boost=0.70 * pump if i == 0 else 0.0), dwell=0))
+        out.append(line(*_zig(idx, (xb, -LIM), (xb, -0.10)), c.palette(1, white_boost=0.70 * pump if i == 0 else 0.0), dwell=0))
         idx += 1
     return out
 
@@ -476,10 +463,10 @@ def sc_half_plane_stagger(c: Ctx):
     x_bot = -0.86 + 1.72 * (1.0 - u1)
 
     return [
-        line((-0.95, y_left), (-0.10, y_left + 0.10), c.palette(0, white_boost=0.65 * pump), dwell=0),
-        line((0.95, y_right), (0.10, y_right - 0.10), c.palette(1, white_boost=0.65 * pump), dwell=0),
-        line((x_top, 0.10), (x_top, 0.95), c.palette(1, white_boost=0.50 * pump), dwell=0),
-        line((x_bot, -0.95), (x_bot, -0.10), c.palette(0, white_boost=0.50 * pump), dwell=0),
+        line((-LIM, y_left), (-0.10, y_left + 0.10), c.palette(0, white_boost=0.65 * pump), dwell=0),
+        line((LIM, y_right), (0.10, y_right - 0.10), c.palette(1, white_boost=0.65 * pump), dwell=0),
+        line((x_top, 0.10), (x_top, LIM), c.palette(1, white_boost=0.50 * pump), dwell=0),
+        line((x_bot, -LIM), (x_bot, -0.10), c.palette(0, white_boost=0.50 * pump), dwell=0),
     ]
 
 
@@ -494,10 +481,10 @@ def sc_double_time_whip(c: Ctx):
     out = []
     for i in range(blades):
         off = (i - (blades - 1) / 2.0) * gap
-        x0 = float(np.clip(x_center + off - slant, -0.95, 0.95))
-        x1 = float(np.clip(x_center + off + slant, -0.95, 0.95))
+        x0 = float(np.clip(x_center + off - slant, -LIM, LIM))
+        x1 = float(np.clip(x_center + off + slant, -LIM, LIM))
         col = c.palette(i % 2, v=1.0, white_boost=0.80 * pump if i == 0 else 0.0)
-        out.append(line(*_zig(i, (x0, -0.95), (x1, 0.95)), col, dwell=0))
+        out.append(line(*_zig(i, (x0, -LIM), (x1, LIM)), col, dwell=0))
     return out
 
 
@@ -512,10 +499,10 @@ def sc_half_time_glide(c: Ctx):
     out = []
     for i in range(blades):
         off = (i - (blades - 1) / 2.0) * gap
-        y0 = float(np.clip(y_center + off - slant, -0.95, 0.95))
-        y1 = float(np.clip(y_center + off + slant, -0.95, 0.95))
+        y0 = float(np.clip(y_center + off - slant, -LIM, LIM))
+        y1 = float(np.clip(y_center + off + slant, -LIM, LIM))
         col = c.palette(i % 2, v=1.0, white_boost=0.70 * pump if i == 1 else 0.0)
-        out.append(line(*_zig(i, (-0.95, y0), (0.95, y1)), col, dwell=0))
+        out.append(line(*_zig(i, (-LIM, y0), (LIM, y1)), col, dwell=0))
     return out
 
 
@@ -523,7 +510,7 @@ def sc_dotted_fan_burst(c: Ctx):
     pump = beat_pump(c)
     n = c.count(5, 7, max(c.energy, 0.45))
     aim = 0.26 + 0.42 * smooth_wave(c.bt, 8.0)
-    spread = 0.42 + 0.24 * pump
+    spread = 0.44 + 0.22 * pump
     ox = -0.58
 
     out = []
@@ -531,13 +518,12 @@ def sc_dotted_fan_burst(c: Ctx):
         u = (i / max(n - 1, 1)) - 0.5
         ang = aim + u * 2.0 * spread
         reach = 1.70 + 0.30 * math.cos(u * math.pi) + 0.20 * pump
-        p0, p1 = ray(ox, -0.95, ang, reach)
+        p0, p1 = ray(ox, -LIM, ang, reach)
         col = c.palette(i % 2, v=0.95)
         if i % 2 == 1:
             out.extend(dotted_line(p0, p1, col, dots=4, dot_len=0.045, phase=c.bt * 2.0))
         else:
             out.append(line(*_zig(i, p0, p1), col, dwell=0))
-        out.append(hot_dot(p1, WHITE, dwell=1))
     return out
 
 
@@ -552,10 +538,10 @@ def sc_dot_matrix_sweep(c: Ctx):
     out = []
     for r in range(rows):
         off = (r - (rows - 1) / 2.0) * (0.24 + 0.10 * pump)
-        y0 = float(np.clip(y_center + off - slant, -0.95, 0.95))
-        y1 = float(np.clip(y_center + off + slant, -0.95, 0.95))
+        y0 = float(np.clip(y_center + off - slant, -LIM, LIM))
+        y1 = float(np.clip(y_center + off + slant, -LIM, LIM))
         col = WHITE if (r == 0 and pump > 0.35) else c.palette(r % 2, v=1.0)
-        out.extend(dotted_line((-0.95, y0), (0.95, y1), col, dots=dots_per_row, dot_len=0.04, phase=c.bt * 1.5 + r * 0.35))
+        out.extend(dotted_line((-LIM, y0), (LIM, y1), col, dots=dots_per_row, dot_len=0.04, phase=c.bt * 1.5 + r * 0.35))
     return out
 
 
@@ -571,22 +557,21 @@ def sc_drop_hyper_strobe(c: Ctx):
 
     if step % 3 == 0:
         x = -0.82 + 1.64 * u
-        out.append(line((x, -0.95), (x, 0.95), WHITE, dwell=0))
-        x2 = float(np.clip(x - 0.22 if x > -0.60 else x + 0.22, -0.95, 0.95))
-        out.append(line((x2, -0.95), (x2, 0.95), c.palette(0), dwell=0))
+        out.append(line((x, -LIM), (x, LIM), WHITE, dwell=0))
+        x2 = float(np.clip(x - 0.22 if x > -0.60 else x + 0.22, -LIM, LIM))
+        out.append(line((x2, LIM), (x2, -LIM), c.palette(0), dwell=0))
     elif step % 3 == 1:
         y_top = 0.18 + 0.74 * u
         y_bot = -0.18 - 0.74 * u
-        out.append(line((-0.95, y_top), (0.95, float(np.clip(y_top + 0.10, -0.95, 0.95))), c.palette(1, white_boost=0.8 * pump), dwell=0))
-        out.append(line((0.95, y_bot), (-0.95, float(np.clip(y_bot - 0.10, -0.95, 0.95))), WHITE, dwell=0))
+        out.append(line((-LIM, y_top), (LIM, float(np.clip(y_top + 0.10, -LIM, LIM))), c.palette(1, white_boost=0.8 * pump), dwell=0))
+        out.append(line((LIM, y_bot), (-LIM, float(np.clip(y_bot - 0.10, -LIM, LIM))), WHITE, dwell=0))
     else:
         n = c.count(5, 6)
         aim = 0.25 + 0.45 * u
         for i in range(n):
             frac = (i / max(n - 1, 1)) - 0.5
-            p0, p1 = ray(-0.62, -0.95, aim + frac * 0.95, 2.3)
+            p0, p1 = ray(-0.62, -LIM, aim + frac * 0.95, 2.3)
             out.append(line(*_zig(i, p0, p1), c.palette(i % 2, white_boost=0.6), dwell=0))
-            out.append(hot_dot(p1, WHITE, dwell=1))
     return out
 
 
@@ -601,10 +586,10 @@ def sc_full_width_wall(c: Ctx):
     out = []
     for i in range(blades):
         off = (i - (blades - 1) / 2.0) * thickness
-        x0 = float(np.clip(x_center + off - tilt, -0.95, 0.95))
-        x1 = float(np.clip(x_center + off + tilt, -0.95, 0.95))
+        x0 = float(np.clip(x_center + off - tilt, -LIM, LIM))
+        x1 = float(np.clip(x_center + off + tilt, -LIM, LIM))
         col = c.palette(i % 2, v=1.0, white_boost=0.75 * pump if i == 0 else 0.0)
-        out.append(line(*_zig(i, (x0, -0.95), (x1, 0.95)), col, dwell=0))
+        out.append(line(*_zig(i, (x0, -LIM), (x1, LIM)), col, dwell=0))
     return out
 
 
@@ -619,10 +604,10 @@ def sc_full_height_sheet(c: Ctx):
     out = []
     for i in range(blades):
         off = (i - (blades - 1) / 2.0) * gap
-        y0 = float(np.clip(y_center + off - slant, -0.95, 0.95))
-        y1 = float(np.clip(y_center + off + slant, -0.95, 0.95))
+        y0 = float(np.clip(y_center + off - slant, -LIM, LIM))
+        y1 = float(np.clip(y_center + off + slant, -LIM, LIM))
         col = c.palette(i % 2, v=1.0, white_boost=0.75 * pump if i == 0 else 0.0)
-        out.append(line(*_zig(i, (-0.95, y0), (0.95, y1)), col, dwell=0))
+        out.append(line(*_zig(i, (-LIM, y0), (LIM, y1)), col, dwell=0))
     return out
 
 
@@ -635,7 +620,7 @@ def sc_random_dir_sweep(c: Ctx):
     dir_idx = int(beat_hash(beat_idx, salt=11) * 8)
     angle = dir_idx * (TAU / 8.0)
 
-    dist = -0.92 + 1.84 * u
+    dist = -0.90 + 1.80 * u
     cx, cy = dist * math.cos(angle), dist * math.sin(angle)
 
     blades = c.count(2, 2)
@@ -645,7 +630,7 @@ def sc_random_dir_sweep(c: Ctx):
         off = (i - (blades - 1) / 2.0) * spacing
         px = cx + off * math.cos(angle)
         py = cy + off * math.sin(angle)
-        seg = clipped_plane(px, py, angle, span=0.95)
+        seg = clipped_plane(px, py, angle, span=LIM)
         if seg is not None:
             col = c.palette(beat_idx % 2 if i == 0 else 1, v=1.0, white_boost=0.8 * pump if i == 0 else 0.0)
             out.append(line(*_zig(i, seg[0], seg[1]), col, dwell=0))
@@ -665,7 +650,7 @@ def sc_multi_plane_cross_sweep(c: Ctx):
         pos = ((u + phase_off) % 1.0)
         x = -0.88 + 1.76 * pos
         col = c.palette(0, v=1.0, white_boost=0.65 * pump if i == 0 else 0.0)
-        out.append(line(*_zig(idx, (x, -0.95), (x, 0.95)), col, dwell=0))
+        out.append(line(*_zig(idx, (x, -LIM), (x, LIM)), col, dwell=0))
         idx += 1
 
     for j in range(n_planes):
@@ -673,10 +658,10 @@ def sc_multi_plane_cross_sweep(c: Ctx):
         pos = ((1.0 - v + phase_off) % 1.0)
         y = -0.88 + 1.76 * pos
         slant = 0.12 * (1.0 if j % 2 == 0 else -1.0)
-        y0 = float(np.clip(y - slant, -0.95, 0.95))
-        y1 = float(np.clip(y + slant, -0.95, 0.95))
+        y0 = float(np.clip(y - slant, -LIM, LIM))
+        y1 = float(np.clip(y + slant, -LIM, LIM))
         col = c.palette(1, v=1.0, white_boost=0.65 * pump if j == 0 else 0.0)
-        out.append(line(*_zig(idx, (-0.95, y0), (0.95, y1)), col, dwell=0))
+        out.append(line(*_zig(idx, (-LIM, y0), (LIM, y1)), col, dwell=0))
         idx += 1
     return out
 
@@ -693,9 +678,9 @@ def sc_random_multi_blade(c: Ctx):
         base_ang = beat_hash(beat_idx, salt=30) * TAU
         ang = base_ang + b * (TAU / max(n_blades, 1))
         flip = -1.0 if beat_hash(beat_idx, salt=90 + b * 13) > 0.5 else 1.0
-        dist = flip * (-0.92 + 1.84 * u)
+        dist = flip * (-0.90 + 1.80 * u)
         cx, cy = dist * math.cos(ang), dist * math.sin(ang)
-        seg = clipped_plane(cx, cy, ang, span=0.95)
+        seg = clipped_plane(cx, cy, ang, span=LIM)
         if seg is not None:
             col = c.palette(b % 2, v=1.0, white_boost=0.8 * pump if b == 0 else 0.0)
             out.append(line(*_zig(b, seg[0], seg[1]), col, dwell=0))
@@ -713,15 +698,14 @@ def sc_twin_scissor_sweep(c: Ctx):
     for i in range(n):
         u = (i / max(n - 1, 1)) - 0.5
         ang = 0.34 + swing + u * (0.38 + 0.18 * pump)
-        p0, p1 = ray(-0.78, -0.95, ang, 2.2)
+        p0, p1 = ray(-0.78, -LIM, ang, 2.2)
         out.append(line(*_zig(idx, p0, p1), c.palette(0, v=1.0), dwell=0))
-        out.append(hot_dot(p1, WHITE, dwell=1))
         idx += 1
 
     for i in range(max(3, n - 1)):
         u = (i / max(n - 2, 1)) - 0.5
         ang = math.pi - (0.36 - swing * 0.85 + u * (0.36 + 0.18 * snare))
-        p0, p1 = ray(-0.28, 0.95, ang, 2.2)
+        p0, p1 = ray(-0.28, LIM, ang, 2.2)
         out.append(line(*_zig(idx, p0, p1), c.palette(1, v=0.85 + 0.15 * snare), dwell=0))
         idx += 1
     return out
@@ -736,10 +720,10 @@ def sc_drop_x_blades(c: Ctx):
     out = []
     for p in range(planes):
         gap = (p - (planes - 1) / 2.0) * (0.24 + 0.14 * pump)
-        y0 = float(np.clip(y_sweep + gap - tilt, -0.95, 0.95))
-        y1 = float(np.clip(y_sweep + gap + tilt, -0.95, 0.95))
+        y0 = float(np.clip(y_sweep + gap - tilt, -LIM, LIM))
+        y1 = float(np.clip(y_sweep + gap + tilt, -LIM, LIM))
         col = c.palette(p % 2, v=1.0, white_boost=0.8 * pump if p == 0 else 0.0)
-        out.append(line(*_zig(p, (-0.95, y0), (0.95, y1)), col, dwell=0))
+        out.append(line(*_zig(p, (-LIM, y0), (LIM, y1)), col, dwell=0))
     return out
 
 
@@ -747,15 +731,12 @@ def sc_quadrant_mirror_sweep(c: Ctx):
     pump = beat_pump(c)
     u = beat_sweep(c.bt, beats_per_pass=1.0, alternate=True)
     sweep_ang = 0.20 + 1.00 * u
-    out = []
-    p0, p1 = ray(-0.94, -0.94, sweep_ang, 1.9 + 0.3 * pump)
-    out.append(line(p0, p1, c.palette(0, white_boost=0.7 * pump), dwell=0))
-    out.append(hot_dot(p1, WHITE, dwell=1))
-
-    p2, p3 = ray(-0.94, 0.94, math.pi - sweep_ang, 1.9 + 0.3 * pump)
-    out.append(line(p3, p2, c.palette(1, white_boost=0.7 * pump), dwell=0))
-    out.append(hot_dot(p3, WHITE, dwell=1))
-    return out
+    p0, p1 = ray(-LIM, -LIM, sweep_ang, 1.9 + 0.3 * pump)
+    p2, p3 = ray(-LIM, LIM, math.pi - sweep_ang, 1.9 + 0.3 * pump)
+    return [
+        line(p0, p1, c.palette(0, white_boost=0.7 * pump), dwell=0),
+        line(p3, p2, c.palette(1, white_boost=0.7 * pump), dwell=0),
+    ]
 
 
 def sc_pendulum_beam_bar(c: Ctx):
@@ -766,7 +747,7 @@ def sc_pendulum_beam_bar(c: Ctx):
     out = []
     for i in range(bars):
         off = (i - (bars - 1) / 2.0) * spacing
-        seg = clipped_plane(-0.22 + off * math.cos(ang), off * math.sin(ang), ang, span=0.95)
+        seg = clipped_plane(-0.22 + off * math.cos(ang), off * math.sin(ang), ang, span=LIM)
         if seg is not None:
             col = c.palette(i % 2, white_boost=0.75 * pump if i == 0 else 0.0)
             out.append(line(*_zig(i, seg[0], seg[1]), col, dwell=0))
@@ -779,17 +760,17 @@ def sc_crisscross_ribbon_planes(c: Ctx):
     y_a = -0.75 + 1.50 * u
     y_b = 0.75 - 1.50 * u
     return [
-        line((-0.95, y_a), (0.95, float(np.clip(y_a + 0.40, -0.95, 0.95))), c.palette(0, white_boost=0.6 * pump), dwell=0),
-        line((0.95, y_b), (-0.95, float(np.clip(y_b + 0.40, -0.95, 0.95))), c.palette(1, white_boost=0.6 * pump), dwell=0),
+        line((-LIM, y_a), (LIM, float(np.clip(y_a + 0.40, -LIM, LIM))), c.palette(0, white_boost=0.6 * pump), dwell=0),
+        line((LIM, y_b), (-LIM, float(np.clip(y_b + 0.40, -LIM, LIM))), c.palette(1, white_boost=0.6 * pump), dwell=0),
     ]
 
 
 def sc_alternating_horizon_gates(c: Ctx):
     pump = beat_pump(c)
-    gap = 0.20 + 0.72 * (0.5 - 0.5 * math.cos(math.pi * c.bt))
+    gap = 0.20 + 0.70 * (0.5 - 0.5 * math.cos(math.pi * c.bt))
     out = [
-        line((-0.95, gap), (0.95, gap), c.palette(0, white_boost=0.75 * pump), dwell=0),
-        line((0.95, -gap), (-0.95, -gap), c.palette(1, white_boost=0.75 * pump), dwell=0),
+        line((-LIM, gap), (LIM, gap), c.palette(0, white_boost=0.75 * pump), dwell=0),
+        line((LIM, -gap), (-LIM, -gap), c.palette(1, white_boost=0.75 * pump), dwell=0),
     ]
     if c.detail >= 0.4:
         out.extend(dotted_line((-0.90, 0.0), (0.90, 0.0), WHITE * (0.55 + 0.45 * pump), dots=4, dot_len=0.035, phase=c.bt * 2.0))
@@ -805,10 +786,8 @@ def sc_prism_dot_fan(c: Ctx):
     for i in range(n):
         u = (i / max(n - 1, 1)) - 0.5
         ang = aim + u * 2.0 * spread
-        p0, p1 = ray(-0.66, -0.95, ang, 2.25)
-        col = c.palette(i % 2)
-        out.append(line(*_zig(i, p0, p1), col, dwell=0))
-        out.append(hot_dot(p1, WHITE, dwell=1))
+        p0, p1 = ray(-0.66, -LIM, ang, 2.25)
+        out.append(line(*_zig(i, p0, p1), c.palette(i % 2), dwell=0))
     return out
 
 
@@ -819,12 +798,12 @@ def sc_hyper_bar_ricochet(c: Ctx):
     x1 = -0.88 + 1.76 * u1
     x2 = 0.88 - 1.76 * u2
     if abs(x1 - x2) < 0.20:
-        x2 = float(np.clip(x1 + (0.22 if x1 < 0 else -0.22), -0.95, 0.95))
+        x2 = float(np.clip(x1 + (0.22 if x1 < 0 else -0.22), -LIM, LIM))
     y1 = -0.88 + 1.76 * u2
     return [
-        line((x1, -0.95), (x1, 0.95), c.palette(0, white_boost=0.85 * pump), dwell=0),
-        line((x2, 0.95), (x2, -0.95), c.palette(1, white_boost=0.85 * pump), dwell=0),
-        line((-0.95, y1), (0.95, y1), WHITE if pump > 0.45 else c.palette(0), dwell=0),
+        line((x1, -LIM), (x1, LIM), c.palette(0, white_boost=0.85 * pump), dwell=0),
+        line((x2, LIM), (x2, -LIM), c.palette(1, white_boost=0.85 * pump), dwell=0),
+        line((-LIM, y1), (LIM, y1), WHITE if pump > 0.45 else c.palette(0), dwell=0),
     ]
 
 
@@ -838,9 +817,9 @@ def sc_horizontal_plane_blast(c: Ctx):
     for p in range(pairs):
         y = 0.18 + 0.72 * eased * ((p + 1) / pairs)
         col = c.palette(p % 2, white_boost=0.8 * pump if p == 0 else 0.0)
-        out.append(line(*_zig(idx, (-0.95, y), (0.95, y)), col, dwell=0))
+        out.append(line(*_zig(idx, (-LIM, y), (LIM, y)), col, dwell=0))
         idx += 1
-        out.append(line(*_zig(idx, (-0.95, -y), (0.95, -y)), col, dwell=0))
+        out.append(line(*_zig(idx, (-LIM, -y), (LIM, -y)), col, dwell=0))
         idx += 1
     return out
 
@@ -848,15 +827,15 @@ def sc_horizontal_plane_blast(c: Ctx):
 def sc_shatter_dot_storm(c: Ctx):
     pump = beat_pump(c)
     frac = c.bt - math.floor(c.bt)
-    r = 0.20 + 0.75 * frac
+    r = 0.20 + 0.74 * frac
     n_dots = c.count(10, 14)
     ox, oy = -0.35 * math.cos(c.bt * TAU / 8.0), 0.0
     out = []
     for i in range(n_dots):
         ang = c.bt * 1.4 + (i / n_dots) * TAU
         rad = r * (0.55 if i % 2 == 0 else 1.0)
-        px = float(np.clip(ox + rad * math.cos(ang), -0.95, 0.95))
-        py = float(np.clip(oy + rad * math.sin(ang), -0.95, 0.95))
+        px = ox + rad * math.cos(ang)
+        py = oy + rad * math.sin(ang)
         col = WHITE if (i % 3 == 0 or pump > 0.5) else c.palette(i % 2)
         out.append(hot_dot((px, py), col, dwell=1))
     return out
@@ -871,7 +850,6 @@ def sc_quad_corner_lasers(c: Ctx):
         ang = 0.22 + 0.85 * u + (i - 1) * 0.22
         p0, p1 = ray(-0.92, -0.92, ang, 2.5)
         out.append(line(*_zig(i, p0, p1), c.palette(i % 2, white_boost=0.8 * pump), dwell=0))
-        out.append(hot_dot(p1, WHITE, dwell=1))
     return out
 
 
@@ -879,16 +857,20 @@ def sc_strobe_tunnel_ribs(c: Ctx):
     pump = beat_pump(c)
     frac = c.bt - math.floor(c.bt)
     layers = c.count(2, 3)
-    cx = -0.24 * smooth_wave(c.bt, 8.0)
+    cx = -0.22 * smooth_wave(c.bt, 8.0)
     out = []
     for l in range(layers):
-        s = 0.26 + 0.66 * (((frac + l / layers) % 1.0))
+        s = 0.26 + 0.65 * (((frac + l / layers) % 1.0))
+        x0 = max(cx - s, -LIM)
+        x1 = min(cx + s, LIM)
+        y0 = -s * 0.85
+        y1 = s * 0.85
         pts = np.array([
-            [max(cx - s, -0.95), -s * 0.85],
-            [min(cx + s, 0.95), -s * 0.85],
-            [min(cx + s, 0.95), s * 0.85],
-            [max(cx - s, -0.95), s * 0.85],
-            [max(cx - s, -0.95), -s * 0.85],
+            [x0, y0],
+            [x1, y0],
+            [x1, y1],
+            [x0, y1],
+            [x0, y0],
         ], float)
         out.append(Path(pts, c.palette(l % 2, white_boost=0.7 * pump), dwell=0))
     return out
@@ -908,10 +890,9 @@ def sc_build_converge_sweep(c: Ctx):
     for i in range(n):
         u = (i / max(n - 1, 1)) - 0.5
         ang = bias + sweep + u * 2.0 * spread
-        p0, p1 = ray(ox, -0.95, ang, 2.3)
+        p0, p1 = ray(ox, -LIM, ang, 2.3)
         col = c.palette(i % 2, v=0.75 + 0.25 * b, white_boost=0.85 * (b ** 2))
         out.append(line(*_zig(i, p0, p1), col, dwell=0))
-        out.append(hot_dot(p1, WHITE, dwell=1))
     return out
 
 
@@ -924,10 +905,10 @@ def sc_build_rising_sheet(c: Ctx):
     out = []
     for p in range(planes):
         gap = (p - (planes - 1) / 2.0) * (0.30 * (1.0 - 0.4 * b) + 0.14)
-        y0 = float(np.clip(y_rise + gap - tilt, -0.94, 0.94))
-        y1 = float(np.clip(y_rise + gap + tilt, -0.94, 0.94))
+        y0 = float(np.clip(y_rise + gap - tilt, -LIM, LIM))
+        y1 = float(np.clip(y_rise + gap + tilt, -LIM, LIM))
         col = c.palette(p % 2, v=0.8 + 0.2 * b, white_boost=0.8 * (b ** 2))
-        out.append(line(*_zig(p, (-0.95, y0), (0.95, y1)), col, dwell=0))
+        out.append(line(*_zig(p, (-LIM, y0), (LIM, y1)), col, dwell=0))
     return out
 
 
@@ -940,9 +921,9 @@ def sc_build_prism_tighten(c: Ctx):
     out = []
     for i in range(blades):
         off = (i / max(blades - 1, 1) - 0.5) * width
-        x = float(np.clip(x_center + off, -0.95, 0.95))
+        x = float(np.clip(x_center + off, -LIM, LIM))
         col = c.palette(i % 2, v=0.75 + 0.25 * b, white_boost=0.85 * (b ** 2))
-        out.append(line(*_zig(i, (x, -0.95), (x, 0.95)), col, dwell=0))
+        out.append(line(*_zig(i, (x, -LIM), (x, LIM)), col, dwell=0))
     return out
 
 
@@ -953,8 +934,8 @@ def sc_build_accelerating_bars(c: Ctx):
     x = -span + 2.0 * span * u
     col = c.palette(0, v=0.8 + 0.2 * b, white_boost=0.9 * (b ** 2))
     return [
-        line((x, -0.95), (x, 0.95), col, dwell=0),
-        line((-x, 0.95), (-x, -0.95), WHITE * (0.45 + 0.55 * b), dwell=0),
+        line((x, -LIM), (x, LIM), col, dwell=0),
+        line((-x, LIM), (-x, -LIM), WHITE * (0.45 + 0.55 * b), dwell=0),
     ]
 
 
@@ -966,8 +947,8 @@ def sc_build_dot_convergence(c: Ctx):
     out = []
     for i in range(n_dots):
         ang = c.rt * 2.2 + (i / n_dots) * TAU
-        px = float(np.clip(ox + r * math.cos(ang), -0.95, 0.95))
-        py = float(np.clip(r * math.sin(ang), -0.95, 0.95))
+        px = ox + r * math.cos(ang)
+        py = r * math.sin(ang)
         col = WHITE if (b > 0.65 or i % 2 == 0) else c.palette(i % 2)
         out.append(hot_dot((px, py), col, dwell=1))
     return out
@@ -979,8 +960,8 @@ def sc_build_split_pinch(c: Ctx):
     wobble = 0.16 * (1.0 - b) * math.sin(c.rt * TAU / 2.0)
     col = c.palette(1, v=0.8 + 0.2 * b, white_boost=0.85 * (b ** 2))
     return [
-        line((-0.95, y_gap - wobble), (0.95, y_gap + wobble), col, dwell=0),
-        line((0.95, -y_gap + wobble), (-0.95, -y_gap - wobble), col, dwell=0),
+        line((-LIM, y_gap - wobble), (LIM, y_gap + wobble), col, dwell=0),
+        line((LIM, -y_gap + wobble), (-LIM, -y_gap - wobble), col, dwell=0),
     ]
 
 
@@ -1003,7 +984,7 @@ def _apply_modifier(paths: list[Path], mod: str, c: Ctx) -> list[Path]:
     if mod == "white_tip_dots":
         dots = []
         for p in paths:
-            if len(p.pts) == 2:
+            if len(p.pts) == 2 and float(np.hypot(*(p.pts[1] - p.pts[0]))) > 0.05:
                 dots.append(hot_dot(p.pts[1], WHITE, dwell=1))
         return paths + dots
 
@@ -1013,8 +994,8 @@ def _apply_modifier(paths: list[Path], mod: str, c: Ctx) -> list[Path]:
         out = []
         for p in paths:
             x, y = p.pts[:, 0], p.pts[:, 1]
-            nx = np.clip(x * ca - y * sa, -0.96, 0.96)
-            ny = np.clip(x * sa + y * ca, -0.96, 0.96)
+            nx = np.clip(x * ca - y * sa, -LIM, LIM)
+            ny = np.clip(x * sa + y * ca, -LIM, LIM)
             out.append(Path(np.stack([nx, ny], 1), p.rgb, p.dwell))
         return out
 
@@ -1023,7 +1004,7 @@ def _apply_modifier(paths: list[Path], mod: str, c: Ctx) -> list[Path]:
         out = []
         for p in paths:
             pts = p.pts.copy()
-            pts[:, 0] = np.clip(pts[:, 0] + dx, -0.96, 0.96)
+            pts[:, 0] = np.clip(pts[:, 0] + dx, -LIM, LIM)
             out.append(Path(pts, p.rgb, p.dwell))
         return out
 
@@ -1032,14 +1013,14 @@ def _apply_modifier(paths: list[Path], mod: str, c: Ctx) -> list[Path]:
         scale = 0.86 + 0.14 * pump
         out = []
         for p in paths:
-            pts = np.clip(p.pts * scale, -0.96, 0.96)
+            pts = np.clip(p.pts * scale, -LIM, LIM)
             out.append(Path(pts, p.rgb, p.dwell))
         return out
 
     if mod == "counter_sweep_plane":
         u = beat_sweep(c.bt + 0.5, beats_per_pass=1.0, alternate=True)
         y = -0.86 + 1.72 * u
-        extra = [line((-0.95, y), (0.95, y), c.palette(1, v=0.9, white_boost=0.5 * beat_pump(c)), dwell=0)]
+        extra = [line((-LIM, y), (LIM, y), c.palette(1, v=0.9, white_boost=0.5 * beat_pump(c)), dwell=0)]
         return paths + extra
 
     if mod == "hat_packet_chop":
@@ -1047,7 +1028,7 @@ def _apply_modifier(paths: list[Path], mod: str, c: Ctx) -> list[Path]:
             return paths
         out = []
         for idx, p in enumerate(paths):
-            if len(p.pts) == 2:
+            if len(p.pts) == 2 and float(np.hypot(*(p.pts[1] - p.pts[0]))) > 0.05:
                 out.extend(dashed_beam(p.pts[0], p.pts[1], p.rgb, segments=3, duty=0.65, phase=c.bt * 2.0 + idx * 0.25))
             else:
                 out.append(p)
@@ -1056,7 +1037,7 @@ def _apply_modifier(paths: list[Path], mod: str, c: Ctx) -> list[Path]:
     return paths
 
 
-# ======================================================================== SMOOTH PRESET MORPHING
+# ======================================================================== SMOOTH RGB-SAFE PRESET MORPHING
 
 def _resample_poly(pts: np.ndarray, k: int) -> np.ndarray:
     if len(pts) == k:
@@ -1072,6 +1053,19 @@ def _resample_poly(pts: np.ndarray, k: int) -> np.ndarray:
     x = np.interp(u, s, pts[:, 0])
     y = np.interp(u, s, pts[:, 1])
     return np.stack([x, y], 1)
+
+
+def _resample_rgb(rgb: np.ndarray, k: int) -> np.ndarray:
+    arr = np.asarray(rgb, dtype=float)
+    if arr.ndim == 1:
+        return np.broadcast_to(arr, (k, 3)).copy()
+    if len(arr) == k:
+        return arr.copy()
+    if len(arr) < 2:
+        return np.repeat(arr[:1], k, axis=0)
+    u_src = np.linspace(0.0, 1.0, len(arr))
+    u_dst = np.linspace(0.0, 1.0, k)
+    return np.stack([np.interp(u_dst, u_src, arr[:, ch]) for ch in range(3)], axis=1)
 
 
 def _morph_paths(prev_paths: list[Path], next_paths: list[Path], alpha: float) -> list[Path]:
@@ -1090,8 +1084,8 @@ def _morph_paths(prev_paths: list[Path], next_paths: list[Path], alpha: float) -
         pts1 = _resample_poly(p1.pts, v_count)
         pts = pts0 * (1.0 - t) + pts1 * t
 
-        c0 = np.broadcast_to(p0.rgb, (v_count, 3))
-        c1 = np.broadcast_to(p1.rgb, (v_count, 3))
+        c0 = _resample_rgb(p0.rgb, v_count)
+        c1 = _resample_rgb(p1.rgb, v_count)
         rgb = c0 * (1.0 - t) + c1 * t
         dwell = int(round(p0.dwell * (1.0 - t) + p1.dwell * t))
         morphed.append(Path(pts, rgb, dwell))

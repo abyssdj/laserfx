@@ -1,15 +1,14 @@
-"""Background engine used by the GUI: audio -> analysis -> FX -> galvo compensation -> laser output."""
+"""Background engine used by the GUI: audio -> analysis -> FX -> galvo physics -> laser output."""
 from __future__ import annotations
 
 import dataclasses
 import threading
-import time
 from dataclasses import dataclass
 
 import numpy as np
 
 from . import audio, output
-from .fx import FXEngine
+from .fx import FXEngine, Path
 from .render import SafetyLimiter, blank_frame, compose
 
 
@@ -28,9 +27,10 @@ class Settings:
     strobe: bool = True
     detail: float = 0.5
     min_fps: int = 80
-    galvo_lag: int = 1              # color-to-XY point shift (-10..+10 pts)
-    corner_dwell: int = 1           # extra dwell points at sharp corners (0..6 pts)
-    blank_delay: int = 1            # extra blanked settling points on jumps (0..6 pts)
+    galvo_lag: int = 2              # color-to-XY point shift (-12..+12 pts)
+    corner_dwell: int = 3           # repeated points at sharp vertices & line ends (0..12 pts)
+    blank_delay: int = 2            # blanked settle points before/after jumps (0..12 pts)
+    corner_brake: float = 0.55      # symmetric deceleration/acceleration into vertices (0.0..1.0)
 
 
 @dataclass
@@ -42,68 +42,117 @@ class Snapshot:
     log: list
 
 
-def apply_galvo_compensation(
+def prepare_paths_for_galvos(
+    paths: list[Path],
+    corner_dwell: int = 0,
+    corner_brake: float = 0.0,
+) -> list[Path]:
+    """Applies physical mirror deceleration and vertex dwell directly on raw Path geometry
+    BEFORE compose() resamples points—ensuring razor-sharp corners instead of rounded turns.
+    """
+    if not paths or (corner_dwell <= 0 and corner_brake <= 0.01):
+        return paths
+
+    out: list[Path] = []
+    brake = min(max(float(corner_brake), 0.0), 1.0)
+
+    for p in paths:
+        pts = np.asarray(p.pts, dtype=float)
+        n = len(pts)
+        if n < 2:
+            out.append(p)
+            continue
+
+        # Short aerial pips (< 0.02 length) already represent stationary points
+        span = float(np.hypot(*(pts[-1] - pts[0]))) if n == 2 else 1.0
+        if n == 2 and span < 0.02:
+            out.append(Path(pts, p.rgb, max(p.dwell, 1)))
+            continue
+
+        # 1. Subdivide segments with S-curve velocity easing so galvos decelerate smoothly into vertices
+        if brake > 0.05:
+            eased_pts = []
+            eased_rgb = []
+            is_per_v = (np.asarray(p.rgb).ndim == 2)
+            rgb_arr = np.asarray(p.rgb, dtype=float)
+            steps = 5
+            u_lin = np.linspace(0.0, 1.0, steps + 1)
+            # Blend linear spacing with smoothstep (0-velocity at endpoints)
+            u_smooth = u_lin * u_lin * (3.0 - 2.0 * u_lin)
+            u = (1.0 - brake) * u_lin + brake * u_smooth
+
+            for seg in range(n - 1):
+                p0, p1 = pts[seg], pts[seg + 1]
+                sl = slice(0, steps) if seg < n - 2 else slice(0, steps + 1)
+                uu = u[sl, None]
+                eased_pts.append(p0 * (1.0 - uu) + p1 * uu)
+                if is_per_v:
+                    c0, c1 = rgb_arr[seg], rgb_arr[seg + 1]
+                    eased_rgb.append(c0 * (1.0 - uu) + c1 * uu)
+            new_pts = np.vstack(eased_pts)
+            new_rgb = np.vstack(eased_rgb) if is_per_v else p.rgb
+        else:
+            new_pts = pts.copy()
+            new_rgb = np.asarray(p.rgb, dtype=float).copy()
+
+        # 2. Insert explicit vertex dwell at start, end, and any corner > ~35 degrees
+        if corner_dwell > 0:
+            v = np.diff(new_pts, axis=0)
+            seg_len = np.hypot(v[:, 0], v[:, 1])
+            valid = seg_len > 1e-5
+            u_vec = np.zeros_like(v)
+            u_vec[valid] = v[valid] / seg_len[valid, None]
+            turn_cos = np.sum(u_vec[:-1] * u_vec[1:], axis=1) if len(u_vec) > 1 else np.array([])
+
+            is_per_v = (new_rgb.ndim == 2)
+            dw_pts = []
+            dw_rgb = []
+            for idx in range(len(new_pts)):
+                is_end = (idx == 0) or (idx == len(new_pts) - 1)
+                is_corner = (0 < idx < len(new_pts) - 1) and (turn_cos[idx - 1] < 0.80)
+                rep = (1 + corner_dwell) if (is_end or is_corner) else 1
+                dw_pts.append(np.repeat(new_pts[idx : idx + 1], rep, axis=0))
+                if is_per_v:
+                    dw_rgb.append(np.repeat(new_rgb[idx : idx + 1], rep, axis=0))
+            new_pts = np.vstack(dw_pts)
+            if is_per_v:
+                new_rgb = np.vstack(dw_rgb)
+
+        out.append(Path(new_pts, new_rgb, dwell=0))
+
+    return out
+
+
+def apply_galvo_timing(
     frame: np.ndarray,
     galvo_lag: int = 0,
-    corner_dwell: int = 0,
     blank_delay: int = 0,
-    max_points: int | None = None,
 ) -> np.ndarray:
-    """Compensates physical scanner inertia and diode-vs-galvo latency on an (N, 5) [x, y, r, g, b] frame."""
-    if len(frame) < 3 or (galvo_lag == 0 and corner_dwell <= 0 and blank_delay <= 0):
+    """Applies blanking settle hold and diode-vs-galvo color shift on an (N, 5) [x, y, r, g, b] frame."""
+    if len(frame) < 3 or (galvo_lag == 0 and blank_delay <= 0):
         return frame
 
-    pts = frame
+    pts = frame.copy()
 
-    # 1. Corner dwell & blanking settle insertion (respecting max_points budget)
-    if corner_dwell > 0 or blank_delay > 0:
-        xy = pts[:, :2]
-        rgb = pts[:, 2:5]
-        lit = rgb.max(axis=1) > 0.01
+    # 1. Blanking delay: blank the first `blank_delay` lit points after every dark jump
+    # and hold the final vertex dark for `blank_delay` points before jumping away
+    if blank_delay > 0:
+        lit = pts[:, 2:5].max(axis=1) > 0.01
+        d = int(blank_delay)
+        for i in range(1, len(pts)):
+            if lit[i] and not lit[i - 1]:
+                end = min(len(pts), i + d)
+                pts[i:end, 2:5] = 0.0
 
-        v = np.diff(xy, axis=0)
-        seg_len = np.hypot(v[:, 0], v[:, 1])
-        valid = seg_len > 1e-4
-        u = np.zeros_like(v)
-        u[valid] = v[valid] / seg_len[valid, None]
-        turn_cos = np.sum(u[:-1] * u[1:], axis=1)
-
-        cap = max_points if max_points is not None else (len(pts) * 2)
-        extra_budget = max(0, cap - len(pts))
-
-        out_list = [pts[0:1]]
-        for i in range(1, len(pts) - 1):
-            row = pts[i : i + 1]
-            out_list.append(row)
-            if extra_budget <= 0:
-                continue
-            prev_lit = bool(lit[i - 1])
-            curr_lit = bool(lit[i])
-            next_lit = bool(lit[i + 1])
-
-            if blank_delay > 0 and (not curr_lit) and (prev_lit or next_lit):
-                rep = min(blank_delay, extra_budget)
-                blank_row = row.copy()
-                blank_row[:, 2:5] = 0.0
-                out_list.append(np.repeat(blank_row, rep, axis=0))
-                extra_budget -= rep
-            elif corner_dwell > 0 and curr_lit and (not prev_lit or not next_lit or turn_cos[i - 1] < 0.65):
-                rep = min(corner_dwell, extra_budget)
-                out_list.append(np.repeat(row, rep, axis=0))
-                extra_budget -= rep
-
-        out_list.append(pts[-1:])
-        pts = np.concatenate(out_list, axis=0)
-
-    # 2. Color-to-XY galvo lag shift (rolls RGB channels relative to XY coordinates)
+    # 2. Color-to-XY galvo lag shift: shifts RGB modulation relative to XY scanner waveform
     if galvo_lag != 0 and len(pts) > abs(galvo_lag):
-        comp = pts.copy()
-        comp[:, 2:5] = np.roll(pts[:, 2:5], int(galvo_lag), axis=0)
-        if galvo_lag > 0:
-            comp[:galvo_lag, 2:5] = 0.0
+        lag = int(galvo_lag)
+        shifted = np.roll(pts[:, 2:5], lag, axis=0)
+        if lag > 0:
+            shifted[:lag] = 0.0
         else:
-            comp[galvo_lag:, 2:5] = 0.0
-        pts = comp
+            shifted[lag:] = 0.0
+        pts[:, 2:5] = shifted
 
     return pts
 
@@ -169,17 +218,18 @@ class Session:
                 if s.blackout:
                     frame = blank_frame(budget)
                 else:
-                    dwell_reserve = min(budget // 4, (int(s.corner_dwell) + int(s.blank_delay)) * 10)
-                    compose_budget = max(60, budget - dwell_reserve)
-                    raw_frame = compose(paths, compose_budget, size=s.size)
-                    comp_frame = apply_galvo_compensation(
+                    shaped_paths = prepare_paths_for_galvos(
+                        paths,
+                        corner_dwell=int(s.corner_dwell),
+                        corner_brake=float(s.corner_brake),
+                    )
+                    raw_frame = compose(shaped_paths, budget, size=s.size)
+                    timed_frame = apply_galvo_timing(
                         raw_frame,
                         galvo_lag=int(s.galvo_lag),
-                        corner_dwell=int(s.corner_dwell),
                         blank_delay=int(s.blank_delay),
-                        max_points=budget,
                     )
-                    frame = safety.apply(comp_frame)
+                    frame = safety.apply(timed_frame)
                 out.pps = s.pps
                 if hasattr(out, "flip"):
                     out.flip = dict(flip_x=s.flip_x, flip_y=s.flip_y, swap_xy=s.swap_xy)

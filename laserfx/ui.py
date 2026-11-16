@@ -1,714 +1,730 @@
-"""A tiny retained-mode widget kit drawn on ONE tkinter Canvas: flat, dark, rounded, modern.
-
-Only the standard library (tkinter) is used, so the packaged app needs nothing else.
-All geometry is in logical units; `UI.k` scales for high-DPI screens.
-"""
+"""Custom-drawn dark UI widgets on a single tkinter Canvas (zero external dependencies)."""
 from __future__ import annotations
 
+import math
+import time
 import tkinter as tk
-from tkinter import font as tkfont
+from dataclasses import dataclass
 
-C = dict(
-    bg="#0c0d11", panel="#14161c", panel2="#1b1e27", panel3="#232734", line="#2a2e3b", text="#eceef5",
-    muted="#8d93a6", dim="#5d6376", accent="#7c6cff", accent2="#22d3ee", ok="#22c55e", warn="#f59e0b",
-    danger="#ef4444", white="#ffffff",
-)
+import numpy as np
+
+C = {
+    "bg": "#0b0f17",
+    "card": "#131926",
+    "card2": "#192234",
+    "line": "#243047",
+    "text": "#f1f5f9",
+    "muted": "#94a3b8",
+    "dim": "#64748b",
+    "accent": "#3b82f6",
+    "accent2": "#8b5cf6",
+    "ok": "#10b981",
+    "warn": "#f59e0b",
+    "danger": "#ef4444",
+    "white": "#ffffff",
+}
 
 
-def _rgb(h):
-    h = h.lstrip("#")
-    return tuple(int(h[i:i + 2], 16) for i in (0, 2, 4))
-
-
-def mix(a, b, t):
-    ra, rb = _rgb(a), _rgb(b)
-    return "#%02x%02x%02x" % tuple(int(x + (y - x) * t) for x, y in zip(ra, rb))
-
-
-def pick_family(root):
-    have = set(tkfont.families(root))
-    for f in ("Segoe UI Variable Text", "Segoe UI", "SF Pro Text", "Helvetica Neue", "Inter", "Roboto", "Ubuntu",
-              "DejaVu Sans", "Helvetica", "Arial"):
-        if f in have:
-            return f
-    return "TkDefaultFont"
+def mix(c1: str, c2: str, t: float) -> str:
+    t = min(max(t, 0.0), 1.0)
+    r1, g1, b1 = int(c1[1:3], 16), int(c1[3:5], 16), int(c1[5:7], 16)
+    r2, g2, b2 = int(c2[1:3], 16), int(c2[3:5], 16), int(c2[5:7], 16)
+    return f"#{int(r1 + (r2 - r1) * t):02x}{int(g1 + (g2 - g1) * t):02x}{int(b1 + (b2 - b1) * t):02x}"
 
 
 class Draw:
-    """Canvas drawing helpers that apply the DPI scale and tag items."""
+    def __init__(self, canvas: tk.Canvas, k: float):
+        self.cv = canvas
+        self.k = k
 
-    def __init__(self, canvas, k=1.0):
-        self.c, self.k = canvas, k
+    def s(self, v):
+        return v * self.k
 
-    def _s(self, pts):
-        return [v * self.k for v in pts]
+    def rect(self, x1, y1, x2, y2, fill="", outline="", w=1, tag=""):
+        k = self.k
+        return self.cv.create_rectangle(x1 * k, y1 * k, x2 * k, y2 * k, fill=fill, outline=outline, width=w * k, tags=tag)
 
-    def rect(self, x1, y1, x2, y2, fill="", outline="", w=0, tag=None):
-        return self.c.create_rectangle(*self._s((x1, y1, x2, y2)), fill=fill, outline=outline,
-                                       width=w * self.k if outline else 0, tags=tag)
+    def rrect(self, x1, y1, x2, y2, r, fill="", outline="", w=1, tag=""):
+        k = self.k
+        x1, y1, x2, y2 = x1 * k, y1 * k, x2 * k, y2 * k
+        r = min(r * k, max(0.0, (x2 - x1) / 2), max(0.0, (y2 - y1) / 2))
+        pts = [
+            x1 + r, y1, x2 - r, y1, x2, y1, x2, y1 + r,
+            x2, y2 - r, x2, y2, x2 - r, y2, x1 + r, y2,
+            x1, y2, x1, y2 - r, x1, y1 + r, x1, y1,
+        ]
+        return self.cv.create_polygon(pts, smooth=True, fill=fill, outline=outline, width=w * k, tags=tag)
 
-    def rrect(self, x1, y1, x2, y2, r, fill="", outline="", w=1, tag=None):
-        r = max(0, min(r, (x2 - x1) / 2, (y2 - y1) / 2))
-        if r < 1:
-            return self.rect(x1, y1, x2, y2, fill, outline, w, tag)
-        pts = [x1 + r, y1, x2 - r, y1, x2, y1, x2, y1 + r, x2, y2 - r, x2, y2, x2 - r, y2, x1 + r, y2,
-               x1, y2, x1, y2 - r, x1, y1 + r, x1, y1]
-        return self.c.create_polygon(self._s(pts), smooth=True, fill=fill, outline=outline,
-                                     width=w * self.k if outline else 0, tags=tag)
+    def line(self, pts, fill, w=1, tag="", smooth=False):
+        k = self.k
+        flat = [c * k for c in pts]
+        return self.cv.create_line(*flat, fill=fill, width=w * k, capstyle="round", joinstyle="round", smooth=smooth, tags=tag)
 
-    def oval(self, x1, y1, x2, y2, fill="", outline="", w=1, tag=None):
-        return self.c.create_oval(*self._s((x1, y1, x2, y2)), fill=fill, outline=outline,
-                                  width=w * self.k if outline else 0, tags=tag)
+    def oval(self, x1, y1, x2, y2, fill="", outline="", w=1, tag=""):
+        k = self.k
+        return self.cv.create_oval(x1 * k, y1 * k, x2 * k, y2 * k, fill=fill, outline=outline, width=w * k, tags=tag)
 
-    def line(self, pts, fill, w=1, tag=None, smooth=False):
-        return self.c.create_line(self._s(pts), fill=fill, width=max(1, w * self.k), capstyle="round",
-                                  joinstyle="round", smooth=smooth, tags=tag)
-
-    def poly(self, pts, fill, tag=None):
-        return self.c.create_polygon(self._s(pts), fill=fill, outline="", tags=tag)
-
-    def text(self, x, y, text, fill, font, anchor="nw", tag=None):
-        return self.c.create_text(x * self.k, y * self.k, text=text, fill=fill, font=font, anchor=anchor, tags=tag)
-
-
-class W:
-    """Base widget: a rectangle that can draw itself and react to the mouse."""
-    interactive = True
-    _n = 0
-
-    def __init__(self, ui):
-        self.ui = ui
-        W._n += 1
-        self.tag = f"w{W._n}"
-        self.x1 = self.y1 = self.x2 = self.y2 = 0
-        self.visible, self.hover, self.pressed = True, False, False
-        ui.widgets.append(self)
-
-    def place(self, x, y, w, h):
-        self.x1, self.y1, self.x2, self.y2 = x, y, x + w, y + h
-        return self
-
-    @property
-    def w(self):
-        return self.x2 - self.x1
-
-    @property
-    def h(self):
-        return self.y2 - self.y1
-
-    def hit(self, x, y):
-        return self.visible and self.x1 <= x <= self.x2 and self.y1 <= y <= self.y2
-
-    def draw(self):
-        pass
-
-    def redraw(self):
-        if not self.visible:
-            return
-        self.ui.c.delete(self.tag)
-        self.draw()
-        self.ui.raise_popup()
-
-    # mouse events (logical coordinates)
-    def press(self, x, y): self.pressed = True; self.redraw()
-    def drag(self, x, y): pass
-    def release(self, x, y, inside): self.pressed = False; self.redraw()
+    def text(self, x, y, txt, fill, font, anchor="w", tag="", width=0):
+        k = self.k
+        kw = {"width": width * k} if width else {}
+        return self.cv.create_text(x * k, y * k, text=txt, fill=fill, font=font, anchor=anchor, tags=tag, **kw)
 
 
 class UI:
-    def __init__(self, root, canvas, k=1.0):
-        self.root, self.c, self.k = root, canvas, k
+    def __init__(self, root: tk.Tk, canvas: tk.Canvas, k: float = 1.0):
+        self.root = root
+        self.cv = canvas
+        self.k = k
         self.d = Draw(canvas, k)
-        fam = pick_family(root)
-        mk = lambda size, weight="normal": tkfont.Font(root=root, family=fam, size=size, weight=weight)  # noqa: E731
-        self.f = dict(body=mk(10), small=mk(9), tiny=mk(8, "bold"), bold=mk(10, "bold"), h=mk(11, "bold"),
-                      title=mk(15, "bold"), big=mk(40, "bold"), mid=mk(13, "bold"))
+        self.logical_h = 760.0
+        fam = "Segoe UI" if tk.TkVersion >= 8.5 else "Helvetica"
+        self.f = {
+            "title": (fam, int(round(13 * k)), "bold"),
+            "big": (fam, int(round(28 * k)), "bold"),
+            "h": (fam, int(round(11 * k)), "bold"),
+            "body": (fam, int(round(10 * k))),
+            "mid": (fam, int(round(10 * k)), "bold"),
+            "small": (fam, int(round(9 * k))),
+            "tiny": (fam, int(round(8 * k)), "bold"),
+        }
         self.widgets: list[W] = []
-        self.hover = self.grab = self.popup = None
-        self.logical_h = 700
-        canvas.bind("<Motion>", self._motion)
-        canvas.bind("<Button-1>", self._press)
-        canvas.bind("<B1-Motion>", self._drag)
-        canvas.bind("<ButtonRelease-1>", self._release)
-        canvas.bind("<Leave>", self._leave)
-        canvas.bind("<MouseWheel>", self._wheel)
-        canvas.bind("<Button-4>", self._wheel)
-        canvas.bind("<Button-5>", self._wheel)
+        self.active_dropdown: Dropdown | None = None
+        self._last_popup_close: float = 0.0
+        canvas.bind("<ButtonPress-1>", self._on_press, add="+")
+        canvas.bind("<B1-Motion>", self._on_drag, add="+")
+        canvas.bind("<ButtonRelease-1>", self._on_release, add="+")
+        canvas.bind("<Motion>", self._on_hover, add="+")
+        self._drag_target: W | None = None
+        self._hover_target: W | None = None
 
-    def fit(self, font, text, maxw):
-        """Shorten `text` with an ellipsis so it is at most maxw logical px wide."""
-        f = self.f[font]
-        if f.measure(text) <= maxw * self.k:
-            return text
-        while len(text) > 1 and f.measure(text + "\u2026") > maxw * self.k:
-            text = text[:-1]
-        return text + "\u2026"
+    def register(self, w: W):
+        self.widgets.append(w)
+        return w
 
-    # ------------------------------------------------------------- plumbing
     def redraw_all(self):
-        self.c.delete("all")
-        self.popup = None
+        self.cv.delete("all")
         for w in self.widgets:
             if w.visible:
                 w.draw()
 
-    def raise_popup(self):
-        if self.popup:
-            self.c.tag_raise("popup")
-
-    def open_popup(self, p):
-        self.close_popup()
-        self.popup = p
-        p.draw()
-
-    def close_popup(self):
-        if self.popup:
-            self.c.delete("popup")
-            self.popup = None
-
-    def _xy(self, e):
-        return e.x / self.k, e.y / self.k
-
-    def _top(self, x, y):
-        if self.popup and self.popup.hit(x, y):
-            return self.popup
+    def _hit(self, x, y) -> W | None:
+        lx, ly = x / self.k, y / self.k
         for w in reversed(self.widgets):
-            if w.interactive and w.hit(x, y):
+            if w.visible and w.interactive and w.contains(lx, ly):
                 return w
         return None
 
-    def _motion(self, e):
-        x, y = self._xy(e)
-        if self.grab:
+    def _on_press(self, e):
+        # If a dropdown popup is open, close it cleanly and swallow this click so it never reopens
+        if self.active_dropdown is not None:
+            self.active_dropdown.close()
             return
-        w = self._top(x, y)
-        if w is not self.hover:
-            old, self.hover = self.hover, w
-            if old:
-                old.hover = False
-                old.redraw()
-            if w:
-                w.hover = True
-                w.redraw()
-            self.c.config(cursor="hand2" if w else "")
-        if w is not None and hasattr(w, "move"):
-            w.move(x, y)
-
-    def _leave(self, e):
-        if self.hover and not self.grab:
-            self.hover.hover = False
-            self.hover.redraw()
-            self.hover = None
-
-    def _press(self, e):
-        x, y = self._xy(e)
-        if self.popup and not self.popup.hit(x, y):
-            self.close_popup()
+        # Swallow stray click events within 180ms of a popup dismissal
+        if (time.monotonic() - self._last_popup_close) < 0.18:
             return
-        w = self._top(x, y)
+        w = self._hit(e.x, e.y)
+        self._drag_target = w
         if w:
-            self.grab = w
-            w.press(x, y)
+            w.on_press(e.x / self.k, e.y / self.k)
 
-    def _drag(self, e):
-        if self.grab:
-            self.grab.drag(*self._xy(e))
+    def _on_drag(self, e):
+        if self._drag_target:
+            self._drag_target.on_drag(e.x / self.k, e.y / self.k)
 
-    def _release(self, e):
-        if self.grab:
-            x, y = self._xy(e)
-            g, self.grab = self.grab, None
-            g.release(x, y, g.hit(x, y))
+    def _on_release(self, e):
+        if self._drag_target:
+            self._drag_target.on_release(e.x / self.k, e.y / self.k)
+            self._drag_target = None
 
-    def _wheel(self, e):
-        x, y = self._xy(e)
-        up = getattr(e, "num", 0) == 4 or getattr(e, "delta", 0) > 0
-        if self.popup and hasattr(self.popup, "scroll"):
-            self.popup.scroll(-1 if up else 1)
+    def _on_hover(self, e):
+        if self.active_dropdown is not None:
+            return
+        w = self._hit(e.x, e.y)
+        if w is not self._hover_target:
+            if self._hover_target:
+                self._hover_target.hovered = False
+                self._hover_target.redraw()
+            self._hover_target = w
+            if w:
+                w.hovered = True
+                w.redraw()
+            self.cv.configure(cursor="hand2" if w else "")
 
 
-# ------------------------------------------------------------------- widgets
-class Label(W):
-    interactive = False
+class W:
+    interactive = True
 
-    def __init__(self, ui, text="", font="body", color=None, anchor="nw"):
-        super().__init__(ui)
-        self.text, self.font, self.color, self.anchor = text, font, color or C["text"], anchor
+    def __init__(self, ui: UI):
+        self.ui = ui
+        self.x1 = self.y1 = self.x2 = self.y2 = 0.0
+        self.w = self.h = 0.0
+        self.visible = True
+        self.hovered = False
+        self.tag = f"w_{id(self)}"
+        ui.register(self)
 
-    def set(self, text=None, color=None):
-        changed = (text is not None and text != self.text) or (color is not None and color != self.color)
-        if text is not None:
-            self.text = text
-        if color is not None:
-            self.color = color
-        if changed:
-            self.redraw()
+    def place(self, x, y, w, h):
+        self.x1, self.y1, self.w, self.h = float(x), float(y), float(w), float(h)
+        self.x2, self.y2 = self.x1 + self.w, self.y1 + self.h
+
+    def contains(self, x, y):
+        return self.x1 <= x <= self.x2 and self.y1 <= y <= self.y2
+
+    def redraw(self):
+        self.ui.cv.delete(self.tag)
+        if self.visible:
+            self.draw()
 
     def draw(self):
-        x = {"nw": self.x1, "w": self.x1, "ne": self.x2, "e": self.x2, "center": (self.x1 + self.x2) / 2}[self.anchor]
-        y = (self.y1 + self.y2) / 2 if self.anchor in ("w", "e", "center") else self.y1
-        self.ui.d.text(x, y, self.text, self.color, self.ui.f[self.font], self.anchor, self.tag)
+        pass
+
+    def on_press(self, x, y):
+        pass
+
+    def on_drag(self, x, y):
+        pass
+
+    def on_release(self, x, y):
+        pass
 
 
 class Card(W):
     interactive = False
 
-    def __init__(self, ui, title="", fill=None, radius=14):
+    def __init__(self, ui: UI, title: str = ""):
         super().__init__(ui)
-        self.title, self.fill, self.radius = title, fill or C["panel"], radius
+        self.title = title
 
     def draw(self):
         d = self.ui.d
-        d.rrect(self.x1, self.y1, self.x2, self.y2, self.radius, self.fill, C["line"], 1, self.tag)
+        d.rrect(self.x1, self.y1, self.x2, self.y2, 12, C["card"], C["line"], 1, self.tag)
         if self.title:
-            d.text(self.x1 + 16, self.y1 + 12, self.title.upper(), C["dim"], self.ui.f["tiny"], "nw", self.tag)
+            d.text(self.x1 + 20, self.y1 + 18, self.title.upper(), C["dim"], self.ui.f["tiny"], "w", self.tag)
 
 
-class Button(W):
-    KINDS = {"primary": (C["accent"], C["white"], None), "success": ("#16a34a", C["white"], None),
-             "danger": ("#dc2626", C["white"], None), "ghost": (C["panel2"], C["text"], C["line"]),
-             "outline_danger": (C["panel"], "#f87171", "#7f1d1d")}
-
-    def __init__(self, ui, text, cb, kind="ghost", font="bold", radius=10):
-        super().__init__(ui)
-        self.text, self.cb, self.kind, self.font, self.radius = text, cb, kind, font, radius
-
-    def set(self, text=None, kind=None):
-        if (text, kind) != (None, None) and ((text or self.text) != self.text or (kind or self.kind) != self.kind):
-            self.text, self.kind = text or self.text, kind or self.kind
-            self.redraw()
-
-    def draw(self):
-        bg, fg, ol = self.KINDS[self.kind]
-        if self.pressed:
-            bg = mix(bg, "#000000", 0.25)
-        elif self.hover:
-            bg = mix(bg, "#ffffff", 0.12)
-        d = self.ui.d
-        d.rrect(self.x1, self.y1, self.x2, self.y2, self.radius, bg, ol or bg, 1, self.tag)
-        d.text((self.x1 + self.x2) / 2, (self.y1 + self.y2) / 2, self.text, fg, self.ui.f[self.font], "center", self.tag)
-
-    def release(self, x, y, inside):
-        self.pressed = False
-        self.redraw()
-        if inside and self.cb:
-            self.cb()
-
-
-class Segmented(W):
-    def __init__(self, ui, options, get, set_, on_change=None):
-        super().__init__(ui)
-        self.options, self.get, self.set_, self.on_change, self._hover_i = options, get, set_, on_change, -1
-
-    def _seg(self, i):
-        w = (self.w - 8) / len(self.options)
-        return self.x1 + 4 + i * w, self.x1 + 4 + (i + 1) * w
-
-    def draw(self):
-        d, cur = self.ui.d, self.get()
-        d.rrect(self.x1, self.y1, self.x2, self.y2, 10, C["panel2"], C["line"], 1, self.tag)
-        for i, (val, label) in enumerate(self.options):
-            a, b = self._seg(i)
-            on = val == cur
-            if on:
-                d.rrect(a, self.y1 + 4, b, self.y2 - 4, 7, C["accent"], C["accent"], 1, self.tag)
-            elif self.hover and i == self._hover_i:
-                d.rrect(a, self.y1 + 4, b, self.y2 - 4, 7, C["panel3"], C["panel3"], 1, self.tag)
-            d.text((a + b) / 2, (self.y1 + self.y2) / 2, label, C["white"] if on else C["muted"], self.ui.f["bold"],
-                   "center", self.tag)
-
-    def _idx(self, x):
-        return min(max(int((x - self.x1 - 4) // ((self.w - 8) / len(self.options))), 0), len(self.options) - 1)
-
-    def move(self, x, y):
-        i = self._idx(x)
-        if i != self._hover_i:
-            self._hover_i = i
-            self.redraw()
-
-    def press(self, x, y):
-        self.set_(self.options[self._idx(x)][0])
-        if self.on_change:
-            self.on_change()
-        self.redraw()
-
-    def release(self, x, y, inside):
-        pass
-
-
-class Toggle(W):
-    def __init__(self, ui, text, get, set_, sub=None):
-        super().__init__(ui)
-        self.text, self.get, self.set_, self.sub = text, get, set_, sub
-
-    def draw(self):
-        d, on = self.ui.d, self.get()
-        cy = (self.y1 + self.y2) / 2
-        if self.sub:
-            d.text(self.x1, cy - 8, self.text, C["text"], self.ui.f["body"], "w", self.tag)
-            d.text(self.x1, cy + 9, self.sub, C["dim"], self.ui.f["small"], "w", self.tag)
-        else:
-            d.text(self.x1, cy, self.text, C["text"], self.ui.f["body"], "w", self.tag)
-        tx2, tw, th = self.x2, 40, 22
-        col = C["accent"] if on else C["panel3"]
-        if self.hover:
-            col = mix(col, "#ffffff", 0.1)
-        d.rrect(tx2 - tw, cy - th / 2, tx2, cy + th / 2, th / 2, col, col, 1, self.tag)
-        kx = tx2 - th / 2 - 0 if on else tx2 - tw + th / 2
-        d.oval(kx - 8, cy - 8, kx + 8, cy + 8, C["white"], "", 0, self.tag)
-
-    def press(self, x, y):
-        self.set_(not self.get())
-        self.redraw()
-
-    def release(self, x, y, inside):
-        pass
-
-
-class Chip(W):
-    def __init__(self, ui, text, get, set_):
-        super().__init__(ui)
-        self.text, self.get, self.set_ = text, get, set_
-
-    def draw(self):
-        on = self.get()
-        bg = C["accent"] if on else C["panel2"]
-        if self.hover:
-            bg = mix(bg, "#ffffff", 0.1)
-        self.ui.d.rrect(self.x1, self.y1, self.x2, self.y2, self.h / 2, bg, C["accent"] if on else C["line"], 1, self.tag)
-        self.ui.d.text((self.x1 + self.x2) / 2, (self.y1 + self.y2) / 2, self.text, C["white"] if on else C["muted"],
-                       self.ui.f["small"], "center", self.tag)
-
-    def press(self, x, y):
-        self.set_(not self.get())
-        self.redraw()
-
-    def release(self, x, y, inside):
-        pass
-
-
-class Slider(W):
-    def __init__(self, ui, text, lo, hi, get, set_, fmt="{:.2f}"):
-        super().__init__(ui)
-        self.text, self.lo, self.hi, self.get, self.set_, self.fmt = text, lo, hi, get, set_, fmt
-
-    def _track(self):
-        return self.x1 + 8, self.x2 - 8, self.y2 - 10
-
-    def draw(self):
-        d, (a, b, y) = self.ui.d, self._track()
-        v = self.get()
-        t = (v - self.lo) / (self.hi - self.lo)
-        d.text(self.x1, self.y1 + 2, self.text, C["text"], self.ui.f["body"], "nw", self.tag)
-        d.text(self.x2, self.y1 + 2, self.fmt.format(v), C["muted"], self.ui.f["body"], "ne", self.tag)
-        d.rrect(a, y - 2, b, y + 2, 2, C["panel3"], C["panel3"], 1, self.tag)
-        if t > 0.01:
-            d.rrect(a, y - 2, a + (b - a) * t, y + 2, 2, C["accent"], C["accent"], 1, self.tag)
-        r = 8 if (self.hover or self.pressed) else 7
-        kx = a + (b - a) * t
-        d.oval(kx - r, y - r, kx + r, y + r, C["white"], C["accent"], 2, self.tag)
-
-    def _set_from(self, x):
-        a, b, _ = self._track()
-        t = min(max((x - a) / (b - a), 0.0), 1.0)
-        self.set_(self.lo + t * (self.hi - self.lo))
-        self.redraw()
-
-    def press(self, x, y):
-        self.pressed = True
-        self._set_from(x)
-
-    def drag(self, x, y):
-        self._set_from(x)
-
-
-class Stepper(W):
-    def __init__(self, ui, text, get, set_, step, lo, hi, fmt="{}"):
-        super().__init__(ui)
-        self.text, self.get, self.set_, self.step, self.lo, self.hi, self.fmt = text, get, set_, step, lo, hi, fmt
-
-    def _btns(self):
-        cy = (self.y1 + self.y2) / 2
-        return (self.x2 - 124, cy - 13, self.x2 - 98, cy + 13), (self.x2 - 26, cy - 13, self.x2, cy + 13)
-
-    def draw(self):
-        d = self.ui.d
-        cy = (self.y1 + self.y2) / 2
-        d.text(self.x1, cy, self.text, C["text"], self.ui.f["body"], "w", self.tag)
-        for (a, b, c_, e), glyph in zip(self._btns(), ("−", "+")):
-            d.rrect(a, b, c_, e, 7, C["panel2"], C["line"], 1, self.tag)
-            d.text((a + c_) / 2, (b + e) / 2, glyph, C["text"], self.ui.f["h"], "center", self.tag)
-        d.text(self.x2 - 62, cy, self.fmt.format(self.get()), C["text"], self.ui.f["bold"], "center", self.tag)
-
-    def press(self, x, y):
-        m, p = self._btns()
-        if m[0] <= x <= m[2]:
-            self.set_(max(self.lo, self.get() - self.step))
-        elif p[0] <= x <= p[2]:
-            self.set_(min(self.hi, self.get() + self.step))
-        self.redraw()
-
-    def release(self, x, y, inside):
-        pass
-
-
-class DropList(W):
-    ROW, MAXROWS = 28, 8
-
-    def __init__(self, ui, anchor, options, current, on_pick):
-        super().__init__(ui)
-        ui.widgets.remove(self)             # popups are managed by UI, not the widget list
-        self.options, self.current, self.on_pick, self.off, self.hrow = options, current, on_pick, 0, -1
-        n = min(len(options), self.MAXROWS)
-        h = n * self.ROW + 8
-        ax1, ay1, ax2, ay2 = anchor
-        self.x1, self.x2 = ax1, ax2
-        below = ay2 + 6
-        self.y1 = below if below + h < ui.logical_h - 8 else ay1 - 6 - h
-        self.y2 = self.y1 + h
-        if current in [v for v, _ in options]:
-            i = [v for v, _ in options].index(current)
-            self.off = min(max(i - n // 2, 0), max(len(options) - n, 0))
-        self.tag = "popup"
-
-    def draw(self):
-        d = self.ui.d
-        d.rrect(self.x1 + 2, self.y1 + 4, self.x2 + 2, self.y2 + 4, 10, "#05060a", "", 0, "popup")
-        d.rrect(self.x1, self.y1, self.x2, self.y2, 10, C["panel2"], C["line"], 1, "popup")
-        n = min(len(self.options), self.MAXROWS)
-        for r in range(n):
-            val, label = self.options[self.off + r]
-            y = self.y1 + 4 + r * self.ROW
-            if self.off + r == self.hrow:
-                d.rrect(self.x1 + 4, y, self.x2 - 4, y + self.ROW, 6, C["panel3"], C["panel3"], 1, "popup")
-            on = val == self.current
-            d.text(self.x1 + 14, y + self.ROW / 2, label, C["accent2"] if on else C["text"], self.ui.f["body"], "w", "popup")
-        if len(self.options) > n:
-            frac, tot = n / len(self.options), self.y2 - self.y1 - 12
-            y0 = self.y1 + 6 + tot * (self.off / len(self.options))
-            d.rrect(self.x2 - 7, y0, self.x2 - 4, y0 + tot * frac, 1.5, C["dim"], C["dim"], 1, "popup")
-
-    def _row(self, y):
-        return self.off + int((y - self.y1 - 4) // self.ROW)
-
-    def move(self, x, y):
-        r = self._row(y)
-        if r != self.hrow and 0 <= r < len(self.options):
-            self.hrow = r
-            self.ui.c.delete("popup")
-            self.draw()
-
-    def scroll(self, d):
-        self.off = min(max(self.off + d, 0), max(len(self.options) - self.MAXROWS, 0))
-        self.ui.c.delete("popup")
-        self.draw()
-
-    def press(self, x, y):
-        r = self._row(y)
-        if 0 <= r < len(self.options):
-            self.ui.close_popup()
-            self.on_pick(self.options[r][0])
-
-    def release(self, x, y, inside):
-        pass
-
-
-class Dropdown(W):
-    def __init__(self, ui, text, options, get, set_):
-        super().__init__(ui)
-        self.text, self.options, self.get, self.set_ = text, options, get, set_
-
-    def _field(self):
-        return self.x2 - 190, self.y1 + 2, self.x2, self.y2 - 2
-
-    def draw(self):
-        d = self.ui.d
-        cy = (self.y1 + self.y2) / 2
-        d.text(self.x1, cy, self.text, C["text"], self.ui.f["body"], "w", self.tag)
-        a, b, c_, e = self._field()
-        bg = C["panel3"] if self.hover else C["panel2"]
-        d.rrect(a, b, c_, e, 9, bg, C["line"], 1, self.tag)
-        cur = self.ui.fit("body", dict(self.options).get(self.get(), str(self.get())), c_ - a - 40)
-        d.text(a + 12, cy, cur, C["text"], self.ui.f["body"], "w", self.tag)
-        d.poly([c_ - 22, cy - 2, c_ - 12, cy - 2, c_ - 17, cy + 4], C["muted"], self.tag)
-
-    def press(self, x, y):
-        if x >= self._field()[0]:
-            self.ui.open_popup(DropList(self.ui, self._field(), self.options, self.get(), self._pick))
-
-    def release(self, x, y, inside):
-        pass
-
-    def _pick(self, v):
-        self.set_(v)
-        self.redraw()
-
-
-class Meter(W):
+class Label(W):
     interactive = False
 
-    def __init__(self, ui, text, color=None):
+    def __init__(self, ui: UI, text="", font="body", color=C["text"], anchor="w"):
         super().__init__(ui)
-        self.text, self.color, self.v = text, color or C["accent2"], 0.0
+        self.text, self.font, self.color, self.anchor = text, font, color, anchor
 
-    def set(self, v):
-        v = min(max(v, 0.0), 1.0)
-        if abs(v - self.v) > 0.01:
-            self.v = v
-            self.redraw()
+    def set(self, text, color=None):
+        if text == self.text and (color is None or color == self.color):
+            return
+        self.text = text
+        if color is not None:
+            self.color = color
+        self.redraw()
 
     def draw(self):
-        d = self.ui.d
-        d.text(self.x1, self.y1, self.text.upper(), C["dim"], self.ui.f["tiny"], "nw", self.tag)
-        y = self.y1 + 22
-        d.rrect(self.x1, y, self.x2, y + 6, 3, C["panel3"], C["panel3"], 1, self.tag)
-        if self.v > 0.02:
-            d.rrect(self.x1, y, self.x1 + (self.x2 - self.x1) * self.v, y + 6, 3,
-                    mix(self.color, C["danger"], max(0.0, self.v - 0.8) * 4), "", 0, self.tag)
-
-
-class BeatDots(W):
-    interactive = False
-
-    def __init__(self, ui):
-        super().__init__(ui)
-        self.active, self.pulse = -1, 0.0
-
-    def set(self, active, pulse):
-        pulse = round(pulse, 1)
-        if (active, pulse) != (self.active, self.pulse):
-            self.active, self.pulse = active, pulse
-            self.redraw()
-
-    def draw(self):
-        d, gap = self.ui.d, 8
-        w = (self.w - 3 * gap) / 4
-        for i in range(4):
-            a = self.x1 + i * (w + gap)
-            if i == self.active:
-                col = mix(C["panel3"], C["white"], 0.35 + 0.65 * self.pulse)
-                fg = C["bg"]
-            else:
-                col, fg = C["panel2"], C["dim"]
-            d.rrect(a, self.y1, a + w, self.y2, 8, col, C["line"] if i != self.active else col, 1, self.tag)
-            d.text(a + w / 2, (self.y1 + self.y2) / 2, str(i + 1), fg, self.ui.f["bold"], "center", self.tag)
+        ax = self.x1 if "w" in self.anchor else (self.x2 if "e" in self.anchor else (self.x1 + self.x2) / 2)
+        ay = (self.y1 + self.y2) / 2
+        self.ui.d.text(ax, ay, self.text, self.color, self.ui.f[self.font], self.anchor, self.tag, width=self.w)
 
 
 class Pill(W):
     interactive = False
 
-    def __init__(self, ui, text="IDLE", color=None):
+    def __init__(self, ui: UI, text="", color=C["dim"]):
         super().__init__(ui)
-        self.text, self.color = text, color or C["dim"]
+        self.text, self.color = text, color
 
-    def set(self, text, color):
-        if (text, color) != (self.text, self.color):
-            self.text, self.color = text, color
-            self.redraw()
+    def set(self, text, color=None):
+        c = color or self.color
+        if text == self.text and c == self.color:
+            return
+        self.text, self.color = text, c
+        self.redraw()
 
     def draw(self):
         d = self.ui.d
-        d.rrect(self.x1, self.y1, self.x2, self.y2, self.h / 2, mix(self.color, C["panel"], 0.78), self.color, 1, self.tag)
-        d.oval(self.x1 + 12, (self.y1 + self.y2) / 2 - 4, self.x1 + 20, (self.y1 + self.y2) / 2 + 4, self.color, "", 0, self.tag)
-        d.text(self.x1 + 28, (self.y1 + self.y2) / 2, self.text, C["text"], self.ui.f["bold"], "w", self.tag)
+        bg = mix(C["card"], self.color, 0.22)
+        bd = mix(C["line"], self.color, 0.55)
+        d.rrect(self.x1, self.y1, self.x2, self.y2, self.h / 2, bg, bd, 1, self.tag)
+        cy = (self.y1 + self.y2) / 2
+        d.oval(self.x1 + 12, cy - 4, self.x1 + 20, cy + 4, self.color, "", 0, self.tag)
+        d.text(self.x1 + 28, cy, self.text, C["text"], self.ui.f["mid"], "w", self.tag)
+
+
+class Button(W):
+    def __init__(self, ui: UI, text, cb, style="secondary", font="mid"):
+        super().__init__(ui)
+        self.text, self.cb, self.style, self.font = text, cb, style, font
+
+    def set(self, text, style=None):
+        self.text = text
+        if style:
+            self.style = style
+        self.redraw()
+
+    def draw(self):
+        d = self.ui.d
+        styles = {
+            "primary": (C["accent"], C["accent"], C["white"]),
+            "success": (C["ok"], C["ok"], "#04130d"),
+            "danger": (C["danger"], C["danger"], C["white"]),
+            "outline_danger": (mix(C["card"], C["danger"], 0.14), mix(C["line"], C["danger"], 0.55), "#fca5a5"),
+            "secondary": (C["card2"], C["line"], C["text"]),
+        }
+        bg, bd, fg = styles.get(self.style, styles["secondary"])
+        if self.hovered:
+            bg = mix(bg, C["white"], 0.10)
+        d.rrect(self.x1, self.y1, self.x2, self.y2, 10, bg, bd, 1, self.tag)
+        d.text((self.x1 + self.x2) / 2, (self.y1 + self.y2) / 2, self.text, fg, self.ui.f[self.font], "center", self.tag)
+
+    def on_release(self, x, y):
+        if self.contains(x, y) and self.cb:
+            self.cb()
+
+
+class Chip(W):
+    def __init__(self, ui: UI, text, getter, setter):
+        super().__init__(ui)
+        self.text, self.get, self.set = text, getter, setter
+
+    def draw(self):
+        d = self.ui.d
+        on = bool(self.get())
+        bg = mix(C["card2"], C["accent"], 0.28) if on else C["card2"]
+        bd = C["accent"] if on else (mix(C["line"], C["white"], 0.15) if self.hovered else C["line"])
+        fg = C["text"] if on else C["muted"]
+        d.rrect(self.x1, self.y1, self.x2, self.y2, 8, bg, bd, 1, self.tag)
+        d.text((self.x1 + self.x2) / 2, (self.y1 + self.y2) / 2, self.text, fg, self.ui.f["small"], "center", self.tag)
+
+    def on_release(self, x, y):
+        if self.contains(x, y):
+            self.set(not self.get())
+            self.redraw()
+
+
+class Toggle(W):
+    def __init__(self, ui: UI, title, getter, setter, sub=""):
+        super().__init__(ui)
+        self.title, self.get, self.set, self.sub = title, getter, setter, sub
+
+    def draw(self):
+        d = self.ui.d
+        on = bool(self.get())
+        cy = (self.y1 + self.y2) / 2
+        if self.sub:
+            d.text(self.x1, cy - 8, self.title, C["text"], self.ui.f["mid"], "w", self.tag)
+            d.text(self.x1, cy + 9, self.sub, C["dim"], self.ui.f["small"], "w", self.tag)
+        else:
+            d.text(self.x1, cy, self.title, C["text"], self.ui.f["body"], "w", self.tag)
+        sw, sh = 42, 24
+        sx1, sy1 = self.x2 - sw, cy - sh / 2
+        bg = C["accent"] if on else C["card2"]
+        bd = C["accent"] if on else C["line"]
+        d.rrect(sx1, sy1, self.x2, sy1 + sh, sh / 2, bg, bd, 1, self.tag)
+        kx = (self.x2 - sh / 2) if on else (sx1 + sh / 2)
+        d.oval(kx - 8, cy - 8, kx + 8, cy + 8, C["white"], "", 0, self.tag)
+
+    def on_release(self, x, y):
+        if self.contains(x, y):
+            self.set(not self.get())
+            self.redraw()
+
+
+class Segmented(W):
+    def __init__(self, ui: UI, items, getter, setter, on_change=None):
+        super().__init__(ui)
+        self.items, self.get, self.set, self.on_change = items, getter, setter, on_change
+
+    def draw(self):
+        d = self.ui.d
+        d.rrect(self.x1, self.y1, self.x2, self.y2, 10, C["card2"], C["line"], 1, self.tag)
+        cur = self.get()
+        n = max(1, len(self.items))
+        iw = (self.w - 6) / n
+        for i, (val, lbl) in enumerate(self.items):
+            ax1 = self.x1 + 3 + i * iw
+            ax2 = ax1 + iw
+            active = val == cur
+            if active:
+                d.rrect(ax1, self.y1 + 3, ax2, self.y2 - 3, 8, C["accent"], "", 0, self.tag)
+            d.text((ax1 + ax2) / 2, (self.y1 + self.y2) / 2, lbl,
+                   C["white"] if active else C["muted"], self.ui.f["mid"], "center", self.tag)
+
+    def on_release(self, x, y):
+        if not self.contains(x, y):
+            return
+        n = max(1, len(self.items))
+        idx = min(n - 1, max(0, int((x - self.x1) / (self.w / n))))
+        val = self.items[idx][0]
+        if val != self.get():
+            self.set(val)
+            self.redraw()
+            if self.on_change:
+                self.on_change()
+
+
+class Slider(W):
+    def __init__(self, ui: UI, title, lo, hi, getter, setter, fmt="{:.0%}"):
+        super().__init__(ui)
+        self.title, self.lo, self.hi, self.get, self.set, self.fmt = title, lo, hi, getter, setter, fmt
+
+    def draw(self):
+        d = self.ui.d
+        v = float(self.get())
+        u = min(max((v - self.lo) / max(1e-9, self.hi - self.lo), 0.0), 1.0)
+        d.text(self.x1, self.y1 + 10, self.title, C["text"], self.ui.f["body"], "w", self.tag)
+        d.text(self.x2, self.y1 + 10, self.fmt.format(v), C["muted"], self.ui.f["mid"], "e", self.tag)
+        ty = self.y1 + 30
+        d.rrect(self.x1, ty - 3, self.x2, ty + 3, 3, C["card2"], "", 0, self.tag)
+        kx = self.x1 + u * self.w
+        if kx > self.x1 + 2:
+            d.rrect(self.x1, ty - 3, kx, ty + 3, 3, C["accent"], "", 0, self.tag)
+        d.oval(kx - 7, ty - 7, kx + 7, ty + 7, C["white"], C["accent"], 2, self.tag)
+
+    def _update(self, x):
+        u = min(max((x - self.x1) / max(1.0, self.w), 0.0), 1.0)
+        self.set(self.lo + u * (self.hi - self.lo))
+        self.redraw()
+
+    def on_press(self, x, y):
+        self._update(x)
+
+    def on_drag(self, x, y):
+        self._update(x)
+
+
+class Stepper(W):
+    def __init__(self, ui: UI, title, getter, setter, step, lo, hi, fmt="{}"):
+        super().__init__(ui)
+        self.title, self.get, self.set, self.step, self.lo, self.hi, self.fmt = title, getter, setter, step, lo, hi, fmt
+
+    def draw(self):
+        d = self.ui.d
+        v = self.get()
+        cy = (self.y1 + self.y2) / 2
+        d.text(self.x1, cy, self.title, C["text"], self.ui.f["body"], "w", self.tag)
+        bw = 26
+        vw = 78
+        px2 = self.x2
+        px1 = px2 - bw
+        vx2 = px1 - 4
+        vx1 = vx2 - vw
+        mx2 = vx1 - 4
+        mx1 = mx2 - bw
+        by1, by2 = cy - 13, cy + 13
+        d.rrect(mx1, by1, mx2, by2, 7, C["card2"], C["line"], 1, self.tag)
+        d.text((mx1 + mx2) / 2, cy, "−", C["text"], self.ui.f["mid"], "center", self.tag)
+        d.text((vx1 + vx2) / 2, cy, self.fmt.format(v), C["text"], self.ui.f["mid"], "center", self.tag)
+        d.rrect(px1, by1, px2, by2, 7, C["card2"], C["line"], 1, self.tag)
+        d.text((px1 + px2) / 2, cy, "+", C["text"], self.ui.f["mid"], "center", self.tag)
+
+    def on_release(self, x, y):
+        if not self.contains(x, y):
+            return
+        bw = 26
+        vw = 78
+        px1 = self.x2 - bw
+        mx2 = px1 - 4 - vw - 4
+        mx1 = mx2 - bw
+        v = self.get()
+        if mx1 <= x <= mx2:
+            self.set(max(self.lo, v - self.step))
+            self.redraw()
+        elif px1 <= x <= self.x2:
+            self.set(min(self.hi, v + self.step))
+            self.redraw()
+
+
+class Dropdown(W):
+    """Canvas-drawn selector with a clean floating Toplevel list that never reopens on click."""
+
+    def __init__(self, ui: UI, title, items, getter, setter):
+        super().__init__(ui)
+        self.title, self.items, self.get, self.set = title, items, getter, setter
+        self._popup: tk.Toplevel | None = None
+
+    def _current_label(self) -> str:
+        cur = self.get()
+        for val, lbl in self.items:
+            if val == cur:
+                return lbl
+        return self.items[0][1] if self.items else ""
+
+    def draw(self):
+        d = self.ui.d
+        cy = (self.y1 + self.y2) / 2
+        lw = min(115.0, self.w * 0.36)
+        d.text(self.x1, cy, self.title, C["muted"], self.ui.f["body"], "w", self.tag)
+        bx1 = self.x1 + lw
+        bd = C["accent"] if (self._popup is not None or self.hovered) else C["line"]
+        d.rrect(bx1, self.y1 + 2, self.x2, self.y2 - 2, 8, C["card2"], bd, 1, self.tag)
+        lbl = self._current_label()
+        if len(lbl) > 24:
+            lbl = lbl[:22] + "…"
+        d.text(bx1 + 12, cy, lbl, C["text"], self.ui.f["mid"], "w", self.tag)
+        d.text(self.x2 - 12, cy, "▾", C["muted"], self.ui.f["small"], "e", self.tag)
+
+    def close(self):
+        self.ui._last_popup_close = time.monotonic()
+        if self.ui.active_dropdown is self:
+            self.ui.active_dropdown = None
+        pop = self._popup
+        self._popup = None
+        if pop is not None:
+            try:
+                pop.grab_release()
+            except Exception:  # noqa: BLE001
+                pass
+            try:
+                pop.destroy()
+            except Exception:  # noqa: BLE001
+                pass
+        self.redraw()
+
+    def _select(self, val):
+        self.set(val)
+        self.close()
+
+    def on_press(self, x, y):
+        # Toggle closed if already open; otherwise open on press (not release) so release never retriggers
+        if self._popup is not None:
+            self.close()
+            return
+        self.open()
+
+    def open(self):
+        if self._popup is not None or not self.items:
+            return
+        k = self.ui.k
+        lw = min(115.0, self.w * 0.36)
+        bx1 = self.x1 + lw
+        box_w = int(round((self.x2 - bx1) * k))
+        root_x = self.ui.cv.winfo_rootx() + int(round(bx1 * k))
+        root_y = self.ui.cv.winfo_rooty() + int(round((self.y2 + 2) * k))
+
+        pop = tk.Toplevel(self.ui.root)
+        pop.overrideredirect(True)
+        pop.configure(bg=C["line"])
+        try:
+            pop.attributes("-topmost", True)
+        except Exception:  # noqa: BLE001
+            pass
+
+        row_h = max(28, int(round(28 * k)))
+        max_rows = min(len(self.items), 11)
+        pop_h = max_rows * row_h + 4
+
+        # Flip upward if near bottom of screen
+        scr_h = self.ui.root.winfo_screenheight()
+        if root_y + pop_h > scr_h - 24:
+            root_y = max(12, self.ui.cv.winfo_rooty() + int(round((self.y1 - 2) * k)) - pop_h)
+
+        pop.geometry(f"{box_w}x{pop_h}+{root_x}+{root_y}")
+        self._popup = pop
+        self.ui.active_dropdown = self
+        self.redraw()
+
+        inner = tk.Frame(pop, bg=C["card2"], bd=0)
+        inner.pack(fill="both", expand=True, padx=1, pady=1)
+
+        cv = tk.Canvas(inner, bg=C["card2"], highlightthickness=0, bd=0, width=box_w - 2, height=pop_h - 2)
+        cv.pack(side="left", fill="both", expand=True)
+
+        total_h = len(self.items) * row_h
+        cv.configure(scrollregion=(0, 0, box_w - 2, total_h))
+
+        cur = self.get()
+        row_items: list[tuple[int, int, object]] = []
+        for idx, (val, lbl) in enumerate(self.items):
+            ry1 = idx * row_h
+            ry2 = ry1 + row_h
+            is_cur = val == cur
+            bg = C["accent"] if is_cur else C["card2"]
+            fg = C["white"] if is_cur else C["text"]
+            r_id = cv.create_rectangle(0, ry1, box_w, ry2, fill=bg, outline="")
+            t_id = cv.create_text(int(12 * k), (ry1 + ry2) // 2, text=lbl, fill=fg, font=self.ui.f["body"], anchor="w")
+            row_items.append((r_id, t_id, val))
+
+        def _row_at(event_y: int) -> int:
+            cy = int(cv.canvasy(event_y))
+            return min(len(self.items) - 1, max(0, cy // row_h))
+
+        def _on_motion(e):
+            hi = _row_at(e.y)
+            for idx, (r_id, t_id, val) in enumerate(row_items):
+                if val == cur:
+                    continue
+                cv.itemconfigure(r_id, fill=mix(C["card2"], C["accent"], 0.35) if idx == hi else C["card2"])
+
+        def _on_click(e):
+            idx = _row_at(e.y)
+            val = self.items[idx][0]
+            self.ui.root.after(1, lambda v=val: self._select(v))
+            return "break"
+
+        def _on_wheel(e):
+            if total_h > pop_h:
+                delta = -1 if e.delta > 0 else 1
+                cv.yview_scroll(delta, "units")
+
+        def _on_outside_click(e):
+            # Close if user clicked anywhere outside the popup window
+            w = e.widget
+            while w is not None:
+                if w is pop:
+                    return
+                w = getattr(w, "master", None)
+            self.close()
+            return "break"
+
+        cv.bind("<Motion>", _on_motion)
+        cv.bind("<ButtonPress-1>", _on_click)
+        cv.bind("<MouseWheel>", _on_wheel)
+        pop.bind("<Escape>", lambda e: self.close())
+        pop.bind("<ButtonPress-1>", _on_outside_click)
+        try:
+            pop.grab_set_global()
+        except Exception:  # noqa: BLE001
+            try:
+                pop.grab_set()
+            except Exception:  # noqa: BLE001
+                pass
+        pop.focus_force()
+
+
+class BeatDots(W):
+    interactive = False
+
+    def __init__(self, ui: UI):
+        super().__init__(ui)
+        self.pos = -1
+        self.pulse = 0.0
+
+    def set(self, pos: int, pulse: float):
+        if pos == self.pos and abs(pulse - self.pulse) < 0.05:
+            return
+        self.pos, self.pulse = pos, pulse
+        self.redraw()
+
+    def draw(self):
+        d = self.ui.d
+        cy = (self.y1 + self.y2) / 2
+        gap = 36
+        sx = self.x2 - 16 - 3 * gap
+        for i in range(4):
+            cx = sx + i * gap
+            active = i == self.pos
+            r = (9 + 3 * self.pulse) if active else 7
+            col = (C["danger"] if i == 0 else C["accent"]) if active else C["card2"]
+            bd = col if active else C["line"]
+            d.oval(cx - r, cy - r, cx + r, cy + r, col, bd, 1, self.tag)
+
+
+class Meter(W):
+    interactive = False
+
+    def __init__(self, ui: UI, name: str, color: str):
+        super().__init__(ui)
+        self.name, self.color = name.upper(), color
+        self.val = 0.0
+
+    def set(self, v: float):
+        v = min(max(float(v), 0.0), 1.0)
+        if abs(v - self.val) < 0.015:
+            return
+        self.val = v
+        self.redraw()
+
+    def draw(self):
+        d = self.ui.d
+        d.text(self.x1, self.y1 + 7, self.name, C["dim"], self.ui.f["tiny"], "w", self.tag)
+        d.text(self.x2, self.y1 + 7, f"{int(round(self.val * 100))}%", C["muted"], self.ui.f["small"], "e", self.tag)
+        ty = self.y1 + 21
+        d.rrect(self.x1, ty - 3, self.x2, ty + 3, 3, C["card2"], "", 0, self.tag)
+        fw = self.w * self.val
+        if fw > 2:
+            d.rrect(self.x1, ty - 3, self.x1 + fw, ty + 3, 3, self.color, "", 0, self.tag)
 
 
 class Timeline(W):
     interactive = False
 
-    def __init__(self, ui, colors):
+    def __init__(self, ui: UI, colors: dict):
         super().__init__(ui)
-        self.colors, self.log, self.now, self._sig = colors, [], 0.0, None
+        self.colors = colors
+        self.log: list = []
+        self.t = 0.0
 
-    def set(self, log, now):
-        sig = (len(log), int(now))
-        if sig != self._sig:
-            self._sig, self.log, self.now = sig, list(log), now
-            self.redraw()
+    def set(self, log: list, t: float):
+        self.log, self.t = log, t
+        self.redraw()
 
     def draw(self):
         d = self.ui.d
-        d.rrect(self.x1, self.y1, self.x2, self.y2, 6, C["panel2"], C["panel2"], 1, self.tag)
-        if not self.log:
+        d.rrect(self.x1, self.y1, self.x2, self.y2, 6, C["card2"], C["line"], 1, self.tag)
+        if not self.log or self.t <= 0.05:
             return
-        span = max(self.now, 60.0)
-        t0 = max(0.0, self.now - span)
-        wpx = self.w - 4
-        ends = [t for t, _ in self.log[1:]] + [self.now]
-        for (t, sec), e in zip(self.log, ends):
-            a = self.x1 + 2 + wpx * (max(t, t0) - t0) / span
-            b = self.x1 + 2 + wpx * (e - t0) / span
-            if b - a < 1.5:
-                continue
-            d.rrect(a, self.y1 + 3, b, self.y2 - 3, 3, self.colors.get(sec, C["dim"]), "", 0, self.tag)
-            if (b - a) * self.ui.k > self.ui.f["tiny"].measure(sec) + 16 * self.ui.k:
-                d.text((a + b) / 2, (self.y1 + self.y2) / 2, sec, C["white"], self.ui.f["tiny"], "center", self.tag)
-        x = self.x1 + 2 + wpx * (self.now - t0) / span
-        d.line([x, self.y1 + 1, x, self.y2 - 1], C["white"], 2, self.tag)
+        total = max(self.t, 0.1)
+        for idx, (ts, sec) in enumerate(self.log):
+            te = self.log[idx + 1][0] if idx + 1 < len(self.log) else total
+            bx1 = self.x1 + 2 + (self.w - 4) * min(max(ts / total, 0.0), 1.0)
+            bx2 = self.x1 + 2 + (self.w - 4) * min(max(te / total, 0.0), 1.0)
+            if bx2 - bx1 >= 1.5:
+                d.rect(bx1, self.y1 + 2, bx2, self.y2 - 2, self.colors.get(sec, C["dim"]), "", 0, self.tag)
 
 
 class Preview(W):
-    """Laser stage: dark panel, faint guides, and the live frame drawn with a soft glow."""
     interactive = False
 
-    def __init__(self, ui):
+    def __init__(self, ui: UI):
         super().__init__(ui)
-        self.frame, self.msg = None, "Press START to preview"
-        self.blackout, self.header = False, ""
+        self.frame: np.ndarray | None = None
+        self.header = ""
+        self.blackout = False
 
-    def square(self):
-        s = min(self.w, self.h) - 36
-        cx, cy = (self.x1 + self.x2) / 2, (self.y1 + self.y2) / 2 + 6
-        return cx - s / 2, cy - s / 2, s
+    def update(self, frame: np.ndarray | None, header: str, blackout: bool):
+        self.frame, self.header, self.blackout = frame, header, blackout
+        self.redraw()
 
     def draw(self):
         d = self.ui.d
-        d.rrect(self.x1, self.y1, self.x2, self.y2, 16, "#07080b", C["line"], 1, self.tag)
-        x0, y0, s = self.square()
-        d.rrect(x0, y0, x0 + s, y0 + s, 6, "#0a0b10", "#171a22", 1, self.tag)
-        for t in (0.25, 0.5, 0.75):
-            col = "#14171f" if t != 0.5 else "#1b1f2a"
-            d.line([x0 + s * t, y0 + 4, x0 + s * t, y0 + s - 4], col, 1, self.tag)
-            d.line([x0 + 4, y0 + s * t, x0 + s - 4, y0 + s * t], col, 1, self.tag)
-        d.text(self.x1 + 16, self.y1 + 12, "LIVE PREVIEW", C["dim"], self.ui.f["tiny"], "nw", self.tag)
-        self._dyn()
+        d.rrect(self.x1, self.y1, self.x2, self.y2, 12, "#060911", C["line"], 1, self.tag)
+        pad = 24
+        side = max(40.0, min(self.w - 2 * pad, self.h - 54))
+        cx = (self.x1 + self.x2) / 2
+        cy = (self.y1 + self.y2) / 2 + 8
+        hs = side / 2
+        d.rect(cx - hs, cy - hs, cx + hs, cy + hs, "#04060c", "#182133", 1, self.tag)
+        d.line([cx - hs, cy, cx + hs, cy], "#101726", 1, self.tag)
+        d.line([cx, cy - hs, cx, cy + hs], "#101726", 1, self.tag)
+        d.text(self.x1 + 16, self.y1 + 16, self.header or "PREVIEW", C["muted"], self.ui.f["small"], "w", self.tag)
 
-    def _dyn(self):
-        d = self.ui.d
-        t = self.tag + "d"
-        self.ui.c.delete(t)
-        d.text(self.x2 - 16, self.y1 + 12, self.header, C["muted"], self.ui.f["small"], "ne", t)
-        x0, y0, s = self.square()
-        fr = self.frame
-        if fr is None:
-            d.text(x0 + s / 2, y0 + s / 2, self.msg, C["dim"], self.ui.f["mid"], "center", t)
-            return
-        px, py = x0 + (fr[:, 0] + 1) * 0.5 * s, y0 + (1 - fr[:, 1]) * 0.5 * s
-        lit = fr[:, 2:5].max(1) > 0.01
-        step = 6
-        chunks = []
-        for i in range(0, len(fr) - 1, step):
-            j = min(i + step, len(fr) - 1)
-            if lit[i] and lit[j]:
-                rgb = tuple(min(255, int(max(v * 2.2, 0.0) * 255)) for v in fr[i, 2:5])
-                chunks.append((i, j, "#%02x%02x%02x" % rgb))
-        glow = len(chunks) <= 220
-        for i, j, col in chunks:
-            pts = []
-            for q in range(i, j + 1):
-                pts += [float(px[q]), float(py[q])]
-            if glow:
-                d.line(pts, mix(col, "#07080b", 0.72), 5, t)
-        for i, j, col in chunks:
-            pts = []
-            for q in range(i, j + 1):
-                pts += [float(px[q]), float(py[q])]
-            d.line(pts, col, 2, t)
         if self.blackout:
-            d.rrect(x0 + s / 2 - 90, y0 + s / 2 - 22, x0 + s / 2 + 90, y0 + s / 2 + 22, 10, "#3b0d0d", "#ef4444", 1, t)
-            d.text(x0 + s / 2, y0 + s / 2, "BLACKOUT", "#fecaca", self.ui.f["mid"], "center", t)
-        self.ui.raise_popup()
+            d.text(cx, cy, "BLACKOUT", C["danger"], self.ui.f["title"], "center", self.tag)
+            return
+        fr = self.frame
+        if fr is None or len(fr) == 0:
+            d.text(cx, cy, "Ready", C["dim"], self.ui.f["body"], "center", self.tag)
+            return
 
-    def update(self, frame, header, blackout):
-        self.frame, self.header, self.blackout = frame, header, blackout
-        self._dyn()
+        xs = cx + fr[:, 0] * hs
+        ys = cy - fr[:, 1] * hs
+        rgb = np.clip(fr[:, 2:5], 0.0, 1.0)
+        lit = rgb.max(axis=1) > 0.02
+
+        i = 0
+        n = len(fr)
+        while i < n:
+            if not lit[i]:
+                i += 1
+                continue
+            j = i
+            while j < n and lit[j]:
+                j += 1
+            seg_rgb = rgb[i:j].max(axis=0)
+            col = f"#{int(seg_rgb[0] * 255):02x}{int(seg_rgb[1] * 255):02x}{int(seg_rgb[2] * 255):02x}"
+            if j - i == 1:
+                px, py = float(xs[i]), float(ys[i])
+                d.oval(px - 2.5, py - 2.5, px + 2.5, py + 2.5, col, "", 0, self.tag)
+            else:
+                pts = []
+                for idx in range(i, j):
+                    pts.extend([float(xs[idx]), float(ys[idx])])
+                d.line(pts, col, 2.2, self.tag)
+            i = j
