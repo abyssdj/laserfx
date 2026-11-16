@@ -1,5 +1,5 @@
-"""LaserFX desktop GUI: QuickShow-inspired live busking cue grid, Projection Zones,
-Tap Tempo, Scanner & Galvo calibration with built-in test patterns.
+"""LaserFX desktop GUI: QuickShow-inspired live busking cue grid, Color-Theory Harmony selector,
+Projection Zones, Scanner & Galvo calibration, and Art-Net DMX512 RGB Override.
 """
 from __future__ import annotations
 
@@ -11,18 +11,17 @@ from tkinter import filedialog, messagebox
 
 from . import audio
 from .audio import BREAKDOWN, BUILD, DROP, MAIN, SILENCE
-from .fx import QUICK_CUES, SCENES, TEST_PATTERNS
+from .fx import HARMONY_MODES, QUICK_CUES, SCENES, TEST_PATTERNS
 from .session import Session, Settings
 from .ui import (C, UI, W, BeatDots, Button, Card, Chip, Dropdown, Label, Meter, Pill, Preview, Segmented, Slider,
                  Stepper, Timeline, Toggle)
 
 SECTION_COLORS = {MAIN: "#3b82f6", BREAKDOWN: "#8b5cf6", BUILD: "#f59e0b", DROP: "#ef4444", SILENCE: "#475569"}
-RW = 408            # right column width
-M = 18              # outer margin
+RW = 408
+M = 18
 
 
 class Bar(W):
-    """Top bar: brand mark, name, and a hairline underneath."""
     interactive = False
 
     def draw(self):
@@ -42,8 +41,8 @@ class App:
         self.root = root
         root.title("LaserFX")
         root.configure(bg=C["bg"])
-        root.minsize(1080, 760)
-        self.canvas = tk.Canvas(root, bg=C["bg"], highlightthickness=0, bd=0, width=1140, height=800)
+        root.minsize(1080, 780)
+        self.canvas = tk.Canvas(root, bg=C["bg"], highlightthickness=0, bd=0, width=1140, height=820)
         self.canvas.pack(fill="both", expand=True)
         self.ui = UI(root, self.canvas, k)
         self.settings = Settings()
@@ -56,7 +55,7 @@ class App:
         self._last_snap = None
         self._last_hud_t = 0.0
         self._build()
-        self._layout(1140, 800)
+        self._layout(1140, 820)
         self.canvas.bind("<Configure>", lambda e: self._layout(e.width / k, e.height / k))
         root.bind("<space>", lambda e: self._toggle_blackout())
         root.bind("<Escape>", lambda e: self._on_escape())
@@ -96,6 +95,36 @@ class App:
             for c in self.cue_chips:
                 c.redraw()
 
+    def _toggle_artnet(self, enabled: bool):
+        self.settings.artnet_enabled = enabled
+        self.session.sync_artnet_config()
+        self._update_artnet_status()
+
+    def _update_artnet_status(self):
+        if not hasattr(self, "artnet_pill"):
+            return
+        if not self.settings.artnet_enabled:
+            self.artnet_pill.set("Art-Net Off", C["dim"])
+            self.artnet_info.set("UDP 6454 idle · using internal harmony engine", C["dim"])
+            return
+        if self.session.artnet.bind_error:
+            self.artnet_pill.set("Port Error", C["danger"])
+            self.artnet_info.set(self.session.artnet.bind_error, C["danger"])
+            return
+        st = self.session.artnet.get_active_override()
+        uni_str = f"Net {self.settings.artnet_net} · Sub {self.settings.artnet_subnet} · Uni {self.settings.artnet_universe} · Ch {self.settings.artnet_channel}"
+        if st is None:
+            self.artnet_pill.set("Listening · 6454", C["warn"])
+            self.artnet_info.set(f"Waiting for DMX ({uni_str})", C["muted"])
+        else:
+            r, g, b = int(st.rgb1[0] * 255), int(st.rgb1[1] * 255), int(st.rgb1[2] * 255)
+            hex_col = f"#{r:02x}{g:02x}{b:02x}" if (r + g + b) > 20 else C["ok"]
+            self.artnet_pill.set(f"RX · {st.source_ip}", hex_col)
+            self.artnet_info.set(
+                f"Dim {int(st.dimmer * 100)}% · RGB({r},{g},{b}) · {uni_str}",
+                C["text"],
+            )
+
     # ----------------------------------------------------------------- build
     def _build(self):
         u, s = self.ui, self.settings
@@ -115,7 +144,7 @@ class App:
         self.tl_cap = Label(u, "SECTIONS", "tiny", C["dim"])
         self.timeline = Timeline(u, SECTION_COLORS)
 
-        # right: 4 tabs (Live / Zone / Scanner / Setup) + body card + actions
+        # right: 4 tabs + body card + actions
         self.tabs = Segmented(
             u,
             [("live", "Live"), ("zone", "Zone"), ("scanner", "Scanner"), ("setup", "Setup")],
@@ -126,7 +155,7 @@ class App:
         self.body = Card(u)
         reg = lambda lst, w: (lst.append(w), w)[1]                        # noqa: E731
 
-        # --- TAB 1: LIVE (Quick-Cue Grid + Look Controls)
+        # --- TAB 1: LIVE (Quick-Cue Grid + Color Harmony + Look Controls)
         L = self.live = []
         self.cap_cues = reg(L, Label(u, "QUICK CUES  (KEYS 1–8 · 0 AUTO)", "tiny", C["dim"]))
         self.cue_auto = reg(L, Chip(u, "Auto Show (0)", lambda: s.scene is None, lambda _: self._trigger_cue(None)))
@@ -144,16 +173,18 @@ class App:
         ]
         self.sl_bright = reg(L, Slider(u, "Master brightness", 0, 1, lambda: s.brightness, lambda v: setattr(s, "brightness", v), "{:.0%}"))
         self.sl_detail = reg(L, Slider(u, "Beam density / detail", 0.2, 1, lambda: s.detail, lambda v: setattr(s, "detail", v), "{:.0%}"))
-        self.tg_strobe = reg(L, Toggle(u, "Strobe effects", lambda: s.strobe, lambda v: setattr(s, "strobe", v),
-                                       "Turn off for photosensitive audiences"))
+        self.dd_harmony = reg(L, Dropdown(u, "Split color", HARMONY_MODES, lambda: s.harmony_mode,
+                                          lambda v: setattr(s, "harmony_mode", v)))
         scenes = [("auto", "Auto (Full Library)")] + [(n, n.replace("_", " ").title()) for n in sorted(SCENES)]
         self.dd_scene = reg(L, Dropdown(u, "Scene lock", scenes, lambda: s.scene or "auto",
                                         lambda v: (setattr(s, "scene", None if v == "auto" else v), self._sync_cue_chips())))
         secs = [("auto", "Auto"), (MAIN, "Main"), (BREAKDOWN, "Breakdown"), (BUILD, "Build"), (DROP, "Drop")]
         self.dd_sec = reg(L, Dropdown(u, "Section lock", secs, lambda: s.section or "auto",
                                       lambda v: setattr(s, "section", None if v == "auto" else v)))
+        self.tg_strobe = reg(L, Toggle(u, "Strobe effects", lambda: s.strobe, lambda v: setattr(s, "strobe", v),
+                                       "Turn off for photosensitive audiences"))
 
-        # --- TAB 2: ZONE (Projection Framing, Position & Keystone)
+        # --- TAB 2: ZONE
         Z = self.zone = []
         self.cap_zone = reg(Z, Label(u, "PROJECTION ZONE GEOMETRY", "tiny", C["dim"]))
         self.sl_size = reg(Z, Slider(u, "Master scale", 0.1, 1.0, lambda: s.size, lambda v: setattr(s, "size", v), "{:.0%}"))
@@ -164,7 +195,7 @@ class App:
         self.sl_ks = reg(Z, Slider(u, "Vertical keystone", -0.4, 0.4, lambda: s.keystone, lambda v: setattr(s, "keystone", v), "{:+.0%}"))
         self.btn_zone_reset = reg(Z, Button(u, "Reset Zone to Full Frame", self._reset_zone, "secondary", "small"))
 
-        # --- TAB 3: SCANNER (Galvo Speed, Sharp Corner Physics & Test Patterns)
+        # --- TAB 3: SCANNER
         S = self.scan = []
         self.st_pps = reg(S, Stepper(u, "Points per second", lambda: s.pps, lambda v: (setattr(s, "pps", int(v)), self._fps()),
                                      1000, 5000, 60000, "{:,}"))
@@ -187,7 +218,7 @@ class App:
         self.chips_flip = [reg(S, Chip(u, t, lambda n=n: getattr(s, n), lambda v, n=n: setattr(s, n, v)))
                            for t, n in (("Flip X", "flip_x"), ("Flip Y", "flip_y"), ("Swap X/Y", "swap_xy"))]
 
-        # --- TAB 4: SETUP (Audio Source & Helios DAC Output)
+        # --- TAB 4: SETUP (Audio Source + Art-Net DMX RGB Override + Laser Output)
         T = self.setup = []
         self.cap_src = reg(T, Label(u, "AUDIO SOURCE", "tiny", C["dim"]))
         self.seg_src = reg(T, Segmented(u, [("file", "Audio file"), ("live", "Live input")], lambda: self.src_mode,
@@ -197,6 +228,27 @@ class App:
         self.dd_dev = reg(T, Dropdown(u, "Input device", [(i, n) for i, n in self.devs] or [(None, "None found")],
                                       lambda: self.dev_idx, lambda v: setattr(self, "dev_idx", v)))
         self.tg_play = reg(T, Toggle(u, "Play through speakers", lambda: self.play, lambda v: setattr(self, "play", v)))
+
+        self.cap_artnet = reg(T, Label(u, "ART-NET DMX512 RGB OVERRIDE (UDP 6454)", "tiny", C["dim"]))
+        self.tg_artnet = reg(T, Toggle(u, "Enable Art-Net RGB", lambda: s.artnet_enabled, self._toggle_artnet))
+        self.artnet_pill = reg(T, Pill(u, "Art-Net Off", C["dim"]))
+        self.st_uni = reg(T, Stepper(u, "Universe (0–15)", lambda: s.artnet_universe,
+                                     lambda v: (setattr(s, "artnet_universe", int(v)), self.session.sync_artnet_config()),
+                                     1, 0, 15, "{}"))
+        self.st_ch = reg(T, Stepper(u, "DMX Start Ch", lambda: s.artnet_channel,
+                                    lambda v: (setattr(s, "artnet_channel", int(v)), self.session.sync_artnet_config()),
+                                    1, 1, 507, "Ch {}"))
+        self.seg_dmx_mode = reg(
+            T,
+            Segmented(
+                u,
+                [(False, "Dim+RGB+Harm"), (True, "Dual RGB1+RGB2")],
+                lambda: s.artnet_dual_rgb,
+                lambda v: (setattr(s, "artnet_dual_rgb", v), self.session.sync_artnet_config()),
+            ),
+        )
+        self.artnet_info = reg(T, Label(u, "UDP 6454 idle · using internal harmony engine", "small", C["dim"], "w"))
+
         self.cap_out = reg(T, Label(u, "LASER OUTPUT", "tiny", C["dim"]))
         self.seg_out = reg(T, Segmented(u, [("preview", "Preview only"), ("helios", "Helios USB")], lambda: self.out_mode,
                                         lambda v: setattr(self, "out_mode", v), self._mode_changed))
@@ -257,13 +309,14 @@ class App:
         for i, chip in enumerate(self.cue_chips):
             col_i = i % 2
             row_i = i // 2
-            chip.place(ix + col_i * (cw + 8), y + 22 + row_i * 32, cw, 27)
-        ly = y + 158
-        self.sl_bright.place(ix, ly, iw, 38)
-        self.sl_detail.place(ix, ly + 42, iw, 38)
-        self.tg_strobe.place(ix, ly + 86, iw, 42)
-        self.dd_scene.place(ix, ly + 134, iw, 36)
-        self.dd_sec.place(ix, ly + 176, iw, 36)
+            chip.place(ix + col_i * (cw + 8), y + 20 + row_i * 30, cw, 25)
+        ly = y + 148
+        self.sl_bright.place(ix, ly, iw, 36)
+        self.sl_detail.place(ix, ly + 40, iw, 36)
+        self.dd_harmony.place(ix, ly + 82, iw, 34)
+        self.dd_scene.place(ix, ly + 122, iw, 34)
+        self.dd_sec.place(ix, ly + 162, iw, 34)
+        self.tg_strobe.place(ix, ly + 202, iw, 38)
 
         # --- ZONE TAB
         y = by + 14
@@ -289,16 +342,27 @@ class App:
             c.place(ix + i * (fw + 8), y + 314, fw, 28)
 
         # --- SETUP TAB
-        y = by + 16
+        y = by + 12
         self.cap_src.place(ix, y, iw, 12)
-        self.seg_src.place(ix, y + 20, iw, 38)
-        self.btn_file.place(ix, y + 72, 140, 36)
-        self.lbl_file.place(ix + 154, y + 72, iw - 154, 36)
-        self.dd_dev.place(ix, y + 72, iw, 36)
-        self.tg_play.place(ix, y + 122, iw, 36)
-        self.cap_out.place(ix, y + 184, iw, 12)
-        self.seg_out.place(ix, y + 204, iw, 38)
-        self.tg_arm.place(ix, y + 256, iw, 48)
+        self.seg_src.place(ix, y + 16, iw, 32)
+        self.btn_file.place(ix, y + 54, 130, 32)
+        self.lbl_file.place(ix + 140, y + 54, iw - 140, 32)
+        self.dd_dev.place(ix, y + 54, iw, 32)
+        self.tg_play.place(ix, y + 90, iw, 28)
+
+        ay = y + 128
+        self.cap_artnet.place(ix, ay, iw, 12)
+        self.tg_artnet.place(ix, ay + 16, iw - 154, 28)
+        self.artnet_pill.place(ix + iw - 148, ay + 16, 148, 28)
+        self.st_uni.place(ix, ay + 48, iw, 28)
+        self.st_ch.place(ix, ay + 80, iw, 28)
+        self.seg_dmx_mode.place(ix, ay + 112, iw, 28)
+        self.artnet_info.place(ix, ay + 144, iw, 18)
+
+        oy = ay + 172
+        self.cap_out.place(ix, oy, iw, 12)
+        self.seg_out.place(ix, oy + 16, iw, 32)
+        self.tg_arm.place(ix, oy + 54, iw, 42)
         self._apply_visibility()
 
     def _apply_visibility(self):
@@ -319,6 +383,7 @@ class App:
         self.tg_arm.sub = ("Beam masked, aimed safely, e-stop in reach" if self.out_mode == "helios"
                            else "Only needed for Helios output")
         self._fps()
+        self._update_artnet_status()
         self.ui.redraw_all()
 
     def _tab_changed(self):
@@ -413,6 +478,7 @@ class App:
             if self.ui.active_dropdown is not None:
                 self.ui.active_dropdown.close()
             self.session.stop()
+            self.session.artnet.stop()
         finally:
             self.root.destroy()
 
@@ -442,6 +508,12 @@ class App:
                 for name, m in self.meters.items():
                     m.set(getattr(f, name))
                 self.timeline.set(snap.log, f.time)
+                self._update_artnet_status()
+        elif self.settings.artnet_enabled:
+            now = time.perf_counter()
+            if now - self._last_hud_t >= 0.15:
+                self._last_hud_t = now
+                self._update_artnet_status()
         self.root.after(8, self._tick)
 
 
@@ -457,7 +529,7 @@ def main():
         k = min(max(root.winfo_fpixels("1i") / 96.0, 1.0), 2.5)
     except Exception:  # noqa: BLE001
         k = 1.0
-    root.geometry(f"{int(1140 * k)}x{int(800 * k)}")
+    root.geometry(f"{int(1140 * k)}x{int(820 * k)}")
     App(root, k)
     root.mainloop()
 

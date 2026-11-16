@@ -1,4 +1,4 @@
-"""Background engine used by the GUI: audio -> analysis -> FX -> zone geometry -> galvo physics -> output."""
+"""Background engine used by the GUI: audio -> analysis -> FX (+Art-Net RGB) -> zone -> galvo physics -> output."""
 from __future__ import annotations
 
 import dataclasses
@@ -9,6 +9,7 @@ from dataclasses import dataclass
 import numpy as np
 
 from . import audio, output
+from .artnet import ArtNetReceiver, ArtNetState
 from .fx import FXEngine, Path, render_test_pattern
 from .render import SafetyLimiter, blank_frame, compose
 
@@ -16,28 +17,36 @@ from .render import SafetyLimiter, blank_frame, compose
 @dataclass
 class Settings:
     brightness: float = 0.55
-    size: float = 0.70              # master uniform scale (used alongside X/Y zone scales)
-    scale_x: float = 1.0            # projection zone horizontal width (0.2..1.0)
-    scale_y: float = 1.0            # projection zone vertical height (0.2..1.0)
-    offset_x: float = 0.0           # projection zone horizontal pan (-0.6..0.6)
-    offset_y: float = 0.0           # projection zone vertical elevation (-0.6..0.6)
-    keystone: float = 0.0           # vertical keystone trapezoid correction (-0.4..0.4)
+    size: float = 0.70
+    scale_x: float = 1.0
+    scale_y: float = 1.0
+    offset_x: float = 0.0
+    offset_y: float = 0.0
+    keystone: float = 0.0
     points: int = 260
     pps: int = 30000
     flip_x: bool = False
     flip_y: bool = False
     swap_xy: bool = False
-    scene: str | None = None        # None = automatic
-    section: str | None = None      # None = automatic
-    test_pattern: str = "off"       # "off" | "ilda_grid" | "corner_box" | "rgb_align"
+    scene: str | None = None
+    section: str | None = None
+    harmony_mode: str = "auto"      # "auto" | "complementary" | "split_complementary" | "rectangular" | "triadic" | "analogous"
+    test_pattern: str = "off"
     blackout: bool = False
     strobe: bool = True
     detail: float = 0.55
     min_fps: int = 80
-    galvo_lag: int = 2              # color-to-XY point shift (-12..+12 pts)
-    corner_dwell: int = 4           # repeated points at sharp vertices & line ends (0..12 pts)
-    blank_delay: int = 2            # blanked settle points before/after jumps (0..12 pts)
-    corner_brake: float = 0.60      # symmetric deceleration/acceleration into vertices (0.0..1.0)
+    galvo_lag: int = 2
+    corner_dwell: int = 4
+    blank_delay: int = 2
+    corner_brake: float = 0.60
+    # Art-Net DMX512 RGB Override settings
+    artnet_enabled: bool = False
+    artnet_net: int = 0
+    artnet_subnet: int = 0
+    artnet_universe: int = 0
+    artnet_channel: int = 1
+    artnet_dual_rgb: bool = False
 
 
 @dataclass
@@ -47,6 +56,7 @@ class Snapshot:
     frame: np.ndarray
     tripped: bool
     log: list
+    artnet: ArtNetState | None = None
 
 
 def apply_zone_geometry(
@@ -57,7 +67,6 @@ def apply_zone_geometry(
     offset_y: float = 0.0,
     keystone: float = 0.0,
 ) -> list[Path]:
-    """Applies Pangolin-style Projection Zone sizing, positioning, and vertical keystone correction."""
     if not paths:
         return paths
     sx = min(max(float(scale_x), 0.1), 1.0)
@@ -87,8 +96,6 @@ def prepare_paths_for_galvos(
     corner_dwell: int = 0,
     corner_brake: float = 0.0,
 ) -> list[Path]:
-    """Applies physical mirror deceleration and vertex dwell directly on raw Path geometry
-    BEFORE compose() resamples points—ensuring razor-sharp corners instead of rounded turns."""
     if not paths or (corner_dwell <= 0 and corner_brake <= 0.01):
         return paths
 
@@ -163,7 +170,6 @@ def apply_galvo_timing(
     galvo_lag: int = 0,
     blank_delay: int = 0,
 ) -> np.ndarray:
-    """Applies blanking settle hold and diode-vs-galvo color shift on an (N, 5) [x, y, r, g, b] frame."""
     if len(frame) < 3 or (galvo_lag == 0 and blank_delay <= 0):
         return frame
 
@@ -200,13 +206,25 @@ class Session:
         self._stop = threading.Event()
         self._thread = None
 
-        # Manual Tap-Tempo / Beat-Sync override state
+        self.artnet = ArtNetReceiver()
         self._tap_times: list[float] = []
         self._manual_bpm: float | None = None
         self._tap_anchor: float = 0.0
 
+    def sync_artnet_config(self):
+        s = self.settings
+        self.artnet.enabled = bool(s.artnet_enabled)
+        self.artnet.net = int(s.artnet_net)
+        self.artnet.subnet = int(s.artnet_subnet)
+        self.artnet.universe = int(s.artnet_universe)
+        self.artnet.start_channel = int(s.artnet_channel)
+        self.artnet.dual_rgb_mode = bool(s.artnet_dual_rgb)
+        if self.artnet.enabled:
+            self.artnet.start()
+        else:
+            self.artnet.stop()
+
     def tap_tempo(self):
-        """Registers a live beat tap (inspired by QuickShow / BEYOND BPM Tap & Sync)."""
         now = time.perf_counter()
         if self._tap_times and (now - self._tap_times[-1]) > 2.2:
             self._tap_times.clear()
@@ -230,6 +248,7 @@ class Session:
 
     def start(self, source, kind: str = "preview"):
         s = self.settings
+        self.sync_artnet_config()
         if kind == "helios":
             out = output.HeliosUSB(0, s.pps, s.flip_x, s.flip_y, s.swap_xy)
             out.open()
@@ -262,11 +281,13 @@ class Session:
         try:
             while not self._stop.is_set() and not getattr(src, "done", False):
                 s = self.settings
+                self.sync_artnet_config()
+                artnet_state = self.artnet.get_active_override()
+
                 chunk = src.read()
                 if len(chunk):
                     feats = an.process(chunk)
 
-                # Apply manual Tap-Tempo override if active
                 if self._manual_bpm is not None:
                     elapsed = time.perf_counter() - self._tap_anchor
                     total_beats = elapsed * (self._manual_bpm / 60.0)
@@ -288,14 +309,16 @@ class Session:
                     eng.force, last_force = s.scene, s.scene
                     eng.section = feats.section
                     eng._pick()
-                eng.strobe_enabled, eng.detail = s.strobe, s.detail
+                eng.strobe_enabled = s.strobe
+                eng.detail = s.detail
+                eng.harmony_mode = s.harmony_mode
                 budget = max(90, min(int(s.points), s.pps // max(s.min_fps, 1)))
 
                 if s.test_pattern and s.test_pattern != "off":
                     paths = render_test_pattern(s.test_pattern, feats.beat_count + feats.beat_phase)
                     scene = f"TEST · {s.test_pattern.upper()}"
                 else:
-                    paths, scene = eng.update(feats)
+                    paths, scene = eng.update(feats, artnet=artnet_state)
 
                 safety.brightness = s.brightness
                 if s.blackout:
@@ -328,7 +351,7 @@ class Session:
                 if len(an.log) != last_log_len:
                     cached_log = list(an.log)
                     last_log_len = len(an.log)
-                self.snapshot = Snapshot(feats, scene, frame, safety.tripped, cached_log)
+                self.snapshot = Snapshot(feats, scene, frame, safety.tripped, cached_log, artnet=artnet_state)
 
                 out.send(frame)
         except Exception as e:  # noqa: BLE001
