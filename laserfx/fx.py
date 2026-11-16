@@ -1,7 +1,7 @@
-"""Laser effects: slow atmospheric Liquid Sky breakdowns with white depth dots & 1-beat piano/synth
-white accents, 1-2 beat solo white drop impact explosions, full-frame sweeps, BPM-locked 8/16-beat
-effect swaps AND colour swaps (1-1-1-2, 1-2-1-2, 1-1-2-2), smooth preset morphing, and secondary
-beat-synced modifiers.
+"""Laser effects: phrase-locked instant vs. morphed effect swaps, colour swaps, varied 1-2 beat
+white drop impact explosions (horizontal plane bursts, dot explosions, fast sweeping bars, radial
+bursts), slow atmospheric Liquid Sky breakdowns with white depth dots & 1-beat piano/synth
+white accents, and expanded effect pools across all sections.
 
 Coordinates are in [-1, 1]; colours are RGB in 0..1.
 Designed for a single output feeding twin projectors where Projector 2 is X-mirrored (x -> -x).
@@ -215,36 +215,82 @@ class Ctx:
         return hsv(h_acc, max(s_acc - white_boost, 0.0), v)
 
 
-# ======================================================================== DROP OPENING EXPLOSION (FIRST 1-2 BEATS)
+# ======================================================================== DROP OPENING EXPLOSIONS (4 VARIATIONS)
 
-def _drop_white_explosion(c: Ctx, progress: float) -> list[Path]:
-    """Solo pure-white explosion of aerial dots and radial burst lines on the first 1-2 beats of a drop."""
-    fade = max(0.0, 1.0 - 0.35 * progress)
+DROP_IMPACT_NAMES = [
+    "drop_white_starburst",
+    "drop_white_plane_burst",
+    "drop_white_dot_explosion",
+    "drop_white_sweep_bars",
+]
+
+
+def _drop_impact_effect(c: Ctx, progress: float, variant: int) -> list[Path]:
+    """Solo pure-white impact variations on the first 1-2 beats of a drop."""
+    fade = max(0.0, 1.0 - 0.30 * progress)
     col_main = WHITE * fade
-    col_soft = WHITE * (0.65 * fade)
-
+    col_soft = WHITE * (0.68 * fade)
+    eased = math.sin(min(progress, 1.0) * math.pi * 0.5)
     out = []
-    ox, oy = -0.32, -0.10
-    n_rays = c.count(6, 9)
-    spin = 0.35 * progress
-    reach = 0.45 + 1.85 * min(progress * 1.4, 1.0)
 
-    for i in range(n_rays):
-        ang = spin + (i / max(n_rays, 1)) * TAU
-        p0, p1 = ray(ox, oy, ang, reach)
-        if progress < 0.55:
-            out.append(line(*_zig(i, p0, p1), col_main, dwell=2))
-        else:
-            out.extend(dotted_line(p0, p1, col_main, dots=4, dot_len=0.045, phase=progress * 2.0))
-        out.append(hot_dot(p1, WHITE, dwell=4))
+    if variant == 0:
+        # Variation 0: Radial white starburst shattering into an expanding dot ring
+        ox, oy = -0.32, -0.10
+        n_rays = c.count(6, 9)
+        spin = 0.35 * progress
+        reach = 0.45 + 1.85 * min(progress * 1.4, 1.0)
+        for i in range(n_rays):
+            ang = spin + (i / max(n_rays, 1)) * TAU
+            p0, p1 = ray(ox, oy, ang, reach)
+            if progress < 0.55:
+                out.append(line(*_zig(i, p0, p1), col_main, dwell=2))
+            else:
+                out.extend(dotted_line(p0, p1, col_main, dots=4, dot_len=0.045, phase=progress * 2.0))
+            out.append(hot_dot(p1, WHITE, dwell=4))
+        n_dots = c.count(8, 12)
+        r_ring = 0.25 + 0.72 * eased
+        for d in range(n_dots):
+            a = -spin * 1.5 + (d / n_dots) * TAU
+            px = float(np.clip(ox + r_ring * math.cos(a), -0.96, 0.96))
+            py = float(np.clip(oy + r_ring * math.sin(a), -0.96, 0.96))
+            out.append(hot_dot((px, py), col_soft if d % 2 else col_main, dwell=4))
 
-    n_dots = c.count(8, 12)
-    r_ring = 0.25 + 0.72 * math.sin(min(progress, 1.0) * math.pi * 0.5)
-    for d in range(n_dots):
-        a = -spin * 1.5 + (d / n_dots) * TAU
-        px = float(np.clip(ox + r_ring * math.cos(a), -0.96, 0.96))
-        py = float(np.clip(oy + r_ring * math.sin(a), -0.96, 0.96))
-        out.append(hot_dot((px, py), col_soft if d % 2 else col_main, dwell=4))
+    elif variant == 1:
+        # Variation 1: Horizontal white plane burst blasting outward from center horizon to top & bottom
+        pairs = c.count(2, 4)
+        for p in range(pairs):
+            frac = (p + 1) / pairs
+            y_off = (0.10 + 0.85 * eased) * frac
+            slant = 0.14 * (1.0 - eased) * (1.0 if p % 2 == 0 else -1.0)
+            for sign in (-1.0, 1.0):
+                y0 = float(np.clip(sign * y_off - slant, -0.96, 0.96))
+                y1 = float(np.clip(sign * y_off + slant, -0.96, 0.96))
+                out.extend(line_with_dots((-0.96, y0), (0.96, y1), col_main, n_dots=4, dot_rgb=WHITE, dwell=2, dot_dwell=3))
+
+    elif variant == 2:
+        # Variation 2: High-density white dot explosion erupting outward in concentric spirals
+        ox, oy = -0.25, 0.05
+        n_arms = c.count(6, 10)
+        dots_per_arm = c.count(3, 5)
+        for arm in range(n_arms):
+            base_a = (arm / n_arms) * TAU + progress * 0.9
+            for k in range(dots_per_arm):
+                r = (0.12 + 0.95 * eased) * ((k + 1) / dots_per_arm)
+                a = base_a + k * 0.18 * progress
+                px = float(np.clip(ox + r * math.cos(a), -0.96, 0.96))
+                py = float(np.clip(oy + r * math.sin(a), -0.96, 0.96))
+                out.append(hot_dot((px, py), col_main if k == dots_per_arm - 1 else col_soft, dwell=4))
+
+    else:
+        # Variation 3: Fast sweeping white vertical & horizontal bars whipping across the whole frame
+        u = beat_sweep(progress * 2.0, beats_per_pass=1.0, alternate=True)
+        x_a = -0.92 + 1.84 * u
+        x_b = 0.92 - 1.84 * u
+        y_c = -0.88 + 1.76 * eased
+        out.append(line((x_a, -0.96), (x_a, 0.96), col_main, dwell=2))
+        out.append(line((x_b, 0.96), (x_b, -0.96), col_main, dwell=2))
+        out.extend(line_with_dots((-0.96, y_c), (0.96, y_c), col_soft, n_dots=5, dot_rgb=WHITE, dwell=2, dot_dwell=3))
+        out.extend(line_with_dots((0.96, -y_c), (-0.96, -y_c), col_soft, n_dots=5, dot_rgb=WHITE, dwell=2, dot_dwell=3))
 
     return out
 
@@ -306,7 +352,7 @@ def sc_breathe_horizon_sky(c: Ctx):
 
 
 def sc_velvet_sky_sweep(c: Ctx):
-    """Ultra-slow vertical sheet (2 lines) drifting across the room over 8 beats with white depth points."""
+    """Ultra-slow vertical sheet (1-2 lines) drifting across the room over 8 beats with white depth points."""
     u = beat_sweep(c.bt, beats_per_pass=8.0, alternate=True)
     x_center = -0.82 + 1.64 * u
     blades = c.count(1, 2)
@@ -332,6 +378,60 @@ def sc_silk_wave_sky(c: Ctx):
     dot_col = WHITE * 0.72
     for idx in (8, 18, 29, 39):
         out.append(hot_dot(pts[idx], dot_col, dwell=3))
+    return out
+
+
+def sc_dual_horizon_mirage(c: Ctx):
+    """Two ultra-slow counter-tilting sky planes (2 lines) with white midpoint & tip pearls."""
+    ang = 0.34 * smooth_wave(c.bt, 20.0)
+    y_base = 0.30 + 0.14 * smooth_wave(c.bt, 32.0)
+    dot_col = WHITE * 0.72
+    out = []
+    out.extend(line_with_dots((-0.95, y_base - ang), (0.95, y_base + ang), c.palette(0, v=0.75), n_dots=5, dot_rgb=dot_col, dwell=1, dot_dwell=3))
+    out.extend(line_with_dots((0.95, y_base - ang * 0.6 - 0.16), (-0.95, y_base + ang * 0.6 - 0.16), c.palette(1, v=0.70), n_dots=4, dot_rgb=dot_col, dwell=1, dot_dwell=3))
+    return out
+
+
+def sc_floating_dot_constellation(c: Ctx):
+    """Single whisper-thin horizon line beneath a slow drifting constellation of white & pastel aerial dots."""
+    y_sky = 0.18 + 0.14 * smooth_wave(c.bt, 24.0)
+    out = line_with_dots((-0.95, y_sky), (0.95, y_sky), c.palette(0, v=0.68), n_dots=3, dot_rgb=WHITE * 0.65, dwell=1, dot_dwell=2)
+    n_stars = c.count(5, 8)
+    for s in range(n_stars):
+        u = (s + 0.5) / n_stars
+        x = -0.86 + 1.72 * u + 0.08 * math.sin(c.bt * TAU / 16.0 + s)
+        y = 0.42 + 0.34 * math.sin(c.bt * TAU / 20.0 + s * 1.7)
+        col = WHITE * 0.78 if s % 2 == 0 else c.palette(1, v=0.80)
+        out.append(hot_dot((float(np.clip(x, -0.94, 0.94)), float(np.clip(y, -0.90, 0.92))), col, dwell=3))
+    return out
+
+
+def sc_slow_v_canopy_sky(c: Ctx):
+    """Wide V-shaped atmospheric canopy (2 lines) slowly opening and breathing over 16 beats."""
+    y_apex = 0.14 + 0.18 * smooth_wave(c.bt, 24.0)
+    wing_lift = 0.28 + 0.24 * smooth_wave(c.bt, 16.0)
+    y_wing = float(np.clip(y_apex + wing_lift, -0.90, 0.92))
+    dot_col = WHITE * 0.74
+    out = []
+    out.extend(line_with_dots((-0.95, y_wing), (0.0, y_apex), c.palette(0, v=0.76), n_dots=3, dot_rgb=dot_col, dwell=1, dot_dwell=3))
+    out.extend(line_with_dots((0.0, y_apex), (0.95, y_wing), c.palette(1, v=0.76), n_dots=3, dot_rgb=dot_col, dwell=1, dot_dwell=3))
+    return out
+
+
+def sc_aurora_sky_curtain(c: Ctx):
+    """Two gently undulating overhead sky curtains drifting in slow phase opposition with white depth dots."""
+    x = np.linspace(-0.94, 0.94, 44)
+    out = []
+    dot_col = WHITE * 0.70
+    for layer in range(c.count(1, 2)):
+        ph = c.bt * TAU / 18.0 + layer * 2.1
+        y = 0.34 + 0.14 * smooth_wave(c.bt, 28.0) + 0.13 * np.sin(1.4 * math.pi * x + ph) - layer * 0.18
+        pts = np.stack([x, np.clip(y, -0.92, 0.92)], 1)
+        if layer == 1:
+            pts = pts[::-1]
+        out.append(Path(pts, c.palette(layer, v=0.74), dwell=0))
+        for idx in (10, 22, 34):
+            out.append(hot_dot(pts[idx], dot_col, dwell=3))
     return out
 
 
@@ -681,6 +781,175 @@ def sc_drop_x_blades(c: Ctx):
     return out
 
 
+# ---------------- NEW MAIN & DROP SCENES FOR MAXIMUM VARIATION
+
+def sc_quadrant_mirror_sweep(c: Ctx):
+    """Four corner-anchored beam blades sweeping inward/outward in synchronized quadrants."""
+    pump = beat_pump(c)
+    u = beat_sweep(c.bt, beats_per_pass=1.0, alternate=True)
+    sweep_ang = 0.18 + 1.05 * u
+    out = []
+    # Bottom-left & top-left origins (X-mirrored unit adds right corners automatically)
+    p0, p1 = ray(-0.94, -0.94, sweep_ang, 1.9 + 0.3 * pump)
+    out.append(line(p0, p1, c.palette(0, white_boost=0.7 * pump), dwell=2))
+    out.append(hot_dot(p1, WHITE, dwell=4))
+
+    p2, p3 = ray(-0.94, 0.94, math.pi - sweep_ang, 1.9 + 0.3 * pump)
+    out.append(line(p3, p2, c.palette(1, white_boost=0.7 * pump), dwell=2))
+    out.append(hot_dot(p3, WHITE, dwell=4))
+    return out
+
+
+def sc_pendulum_beam_bar(c: Ctx):
+    """Wide rotating aerial light bar pivoting smoothly like a giant pendulum across the center."""
+    pump = beat_pump(c)
+    ang = 0.85 * smooth_wave(c.bt, 4.0)
+    bars = c.count(2, 4)
+    spacing = 0.09 + 0.08 * pump
+    out = []
+    for i in range(bars):
+        off = (i - (bars - 1) / 2.0) * spacing
+        seg = clipped_plane(-0.22 + off * math.cos(ang), off * math.sin(ang), ang, span=0.95)
+        if seg is not None:
+            col = c.palette(i % 2, white_boost=0.75 * pump if i == 0 else 0.0)
+            out.append(line(*_zig(i, seg[0], seg[1]), col, dwell=2))
+    return out
+
+
+def sc_crisscross_ribbon_planes(c: Ctx):
+    """Two counter-sweeping diagonal laser ribbons with glowing white depth dots along their ridges."""
+    pump = beat_pump(c)
+    u = beat_sweep(c.bt, beats_per_pass=1.0, alternate=True)
+    y_a = -0.75 + 1.50 * u
+    y_b = 0.75 - 1.50 * u
+    out = []
+    out.extend(line_with_dots((-0.95, y_a), (0.95, float(np.clip(y_a + 0.42, -0.95, 0.95))), c.palette(0, white_boost=0.6 * pump), n_dots=4, dot_rgb=WHITE, dwell=2, dot_dwell=3))
+    out.extend(line_with_dots((0.95, y_b), (-0.95, float(np.clip(y_b + 0.42, -0.95, 0.95))), c.palette(1, white_boost=0.6 * pump), n_dots=4, dot_rgb=WHITE, dwell=2, dot_dwell=3))
+    return out
+
+
+def sc_alternating_horizon_gates(c: Ctx):
+    """Beat-alternating wide horizontal gates that open from center on odd beats and close on even beats."""
+    pump = beat_pump(c)
+    beat_idx = int(math.floor(c.bt))
+    frac = c.bt - beat_idx
+    eased = 0.5 - 0.5 * math.cos(math.pi * frac)
+    gap = (0.12 + 0.78 * eased) if (beat_idx % 2 == 0) else (0.90 - 0.78 * eased)
+    out = [
+        line((-0.96, gap), (0.96, gap), c.palette(0, white_boost=0.75 * pump), dwell=2),
+        line((0.96, -gap), (-0.96, -gap), c.palette(1, white_boost=0.75 * pump), dwell=2),
+    ]
+    if c.detail >= 0.4:
+        out.extend(dotted_line((-0.90, 0.0), (0.90, 0.0), WHITE * (0.5 + 0.5 * pump), dots=6, dot_len=0.03, phase=c.bt * 2.0))
+    return out
+
+
+def sc_prism_dot_fan(c: Ctx):
+    """Asymmetric prism fan with alternating solid beams, dotted trails, and double white tip dots."""
+    pump = beat_pump(c)
+    n = c.count(5, 8)
+    aim = 0.30 + 0.44 * smooth_wave(c.bt, 6.0)
+    spread = 0.36 + 0.22 * pump
+    out = []
+    for i in range(n):
+        u = (i / max(n - 1, 1)) - 0.5
+        ang = aim + u * 2.0 * spread
+        p0, p1 = ray(-0.66, -0.95, ang, 2.25)
+        col = c.palette(i % 2)
+        out.append(line(*_zig(i, p0, p1), col, dwell=1))
+        out.append(hot_dot(p1, WHITE, dwell=4))
+        mid = ((p0[0] + p1[0]) * 0.5, (p0[1] + p1[1]) * 0.5)
+        out.append(hot_dot(mid, WHITE * 0.85, dwell=3))
+    return out
+
+
+def sc_hyper_bar_ricochet(c: Ctx):
+    """Drop fast sweeping bars: 3 to 5 tall & wide bars ricocheting at 2x BPM across the entire stage."""
+    pump = beat_pump(c)
+    u1 = beat_sweep(c.bt, beats_per_pass=0.5, alternate=True)
+    u2 = beat_sweep(c.bt + 0.25, beats_per_pass=0.5, alternate=True)
+    x1 = -0.92 + 1.84 * u1
+    x2 = 0.92 - 1.84 * u2
+    y1 = -0.90 + 1.80 * u2
+    out = [
+        line((x1, -0.96), (x1, 0.96), c.palette(0, white_boost=0.85 * pump), dwell=2),
+        line((x2, 0.96), (x2, -0.96), c.palette(1, white_boost=0.85 * pump), dwell=2),
+        line((-0.96, y1), (0.96, y1), WHITE if pump > 0.45 else c.palette(0), dwell=2),
+    ]
+    return out
+
+
+def sc_horizontal_plane_blast(c: Ctx):
+    """Drop horizontal plane burst: stacked wide planes erupting outward from the center on every beat."""
+    pump = beat_pump(c)
+    frac = c.bt - math.floor(c.bt)
+    eased = math.sin(frac * math.pi * 0.5)
+    pairs = c.count(2, 3)
+    out = []
+    idx = 0
+    for p in range(pairs):
+        scale = (p + 1) / pairs
+        y = (0.08 + 0.84 * eased) * scale
+        col = c.palette(p % 2, white_boost=0.8 * pump if p == 0 else 0.0)
+        out.append(line(*_zig(idx, (-0.96, y), (0.96, y)), col, dwell=2))
+        idx += 1
+        out.append(line(*_zig(idx, (-0.96, -y), (0.96, -y)), col, dwell=2))
+        idx += 1
+    return out
+
+
+def sc_shatter_dot_storm(c: Ctx):
+    """Drop dot explosion storm: fast expanding rings and sweeping rows of piercing white & neon dots."""
+    pump = beat_pump(c)
+    frac = c.bt - math.floor(c.bt)
+    r = 0.15 + 0.85 * frac
+    n_dots = c.count(10, 16)
+    ox, oy = -0.35 * math.cos(c.bt * TAU / 8.0), 0.0
+    out = []
+    for i in range(n_dots):
+        ang = c.bt * 1.4 + (i / n_dots) * TAU
+        rad = r * (0.55 if i % 2 == 0 else 1.0)
+        px = float(np.clip(ox + rad * math.cos(ang), -0.96, 0.96))
+        py = float(np.clip(oy + rad * math.sin(ang), -0.96, 0.96))
+        col = WHITE if (i % 3 == 0 or pump > 0.5) else c.palette(i % 2)
+        out.append(hot_dot((px, py), col, dwell=4))
+    return out
+
+
+def sc_quad_corner_lasers(c: Ctx):
+    """High-speed corner beam whips firing across the diagonal on every beat."""
+    pump = beat_pump(c)
+    u = beat_sweep(c.bt, beats_per_pass=0.5, alternate=True)
+    blades = c.count(2, 3)
+    out = []
+    for i in range(blades):
+        ang = 0.20 + 0.95 * u + (i - 1) * 0.14
+        p0, p1 = ray(-0.92, -0.92, ang, 2.5)
+        out.append(line(*_zig(i, p0, p1), c.palette(i % 2, white_boost=0.8 * pump), dwell=2))
+        out.append(hot_dot(p1, WHITE, dwell=4))
+    return out
+
+
+def sc_strobe_tunnel_ribs(c: Ctx):
+    """Fast-pulsing geometric aerial ribs that expand on every beat with white corner dots."""
+    pump = beat_pump(c)
+    frac = c.bt - math.floor(c.bt)
+    layers = c.count(2, 3)
+    cx = -0.28 * smooth_wave(c.bt, 8.0)
+    out = []
+    for l in range(layers):
+        s = 0.25 + 0.68 * (((frac + l / layers) % 1.0))
+        pts = np.array([
+            [max(cx - s, -0.95), -s * 0.85],
+            [min(cx + s, 0.95), -s * 0.85],
+            [min(cx + s, 0.95), s * 0.85],
+            [max(cx - s, -0.95), s * 0.85],
+            [max(cx - s, -0.95), -s * 0.85],
+        ], float)
+        out.append(Path(pts, c.palette(l % 2, white_boost=0.7 * pump), dwell=2))
+    return out
+
+
 # ======================================================================== BUILD SECTION SCENES
 
 def sc_build_converge_sweep(c: Ctx):
@@ -734,6 +1003,47 @@ def sc_build_prism_tighten(c: Ctx):
         col = c.palette(i % 2, v=0.75 + 0.25 * b, white_boost=0.85 * (b ** 2))
         out.append(line(*_zig(i, (x, -0.95), (x, 0.95)), col, dwell=2))
     return out
+
+
+def sc_build_accelerating_bars(c: Ctx):
+    """Opposing horizontal & vertical bars that accelerate inward toward center impact at drop."""
+    b = c.f.build
+    u = beat_sweep(c.rt, beats_per_pass=0.5, alternate=True)
+    span = 0.92 * (1.0 - 0.75 * b) + 0.06
+    x = -span + 2.0 * span * u
+    col = c.palette(0, v=0.8 + 0.2 * b, white_boost=0.9 * (b ** 2))
+    return [
+        line((x, -0.95), (x, 0.95), col, dwell=2),
+        line((-x, 0.95), (-x, -0.95), WHITE * (0.4 + 0.6 * b), dwell=2),
+    ]
+
+
+def sc_build_dot_convergence(c: Ctx):
+    """Swirling ring of white & colored dots spiraling inward into a tight high-energy core."""
+    b = c.f.build
+    n_dots = c.count(8, 14)
+    r = 0.90 * (1.0 - 0.82 * b) + 0.05
+    ox = -0.32 * (1.0 - b)
+    out = []
+    for i in range(n_dots):
+        ang = c.rt * 2.2 + (i / n_dots) * TAU
+        px = float(np.clip(ox + r * math.cos(ang), -0.95, 0.95))
+        py = float(np.clip(r * math.sin(ang), -0.95, 0.95))
+        col = WHITE if (b > 0.65 or i % 2 == 0) else c.palette(i % 2)
+        out.append(hot_dot((px, py), col, dwell=4))
+    return out
+
+
+def sc_build_split_pinch(c: Ctx):
+    """Top and bottom horizontal sheets pinching toward the center horizon as build peaks."""
+    b = c.f.build
+    y_gap = 0.90 * (1.0 - 0.85 * b) + 0.04
+    wobble = 0.18 * (1.0 - b) * math.sin(c.rt * TAU / 2.0)
+    col = c.palette(1, v=0.8 + 0.2 * b, white_boost=0.85 * (b ** 2))
+    return [
+        line((-0.95, y_gap - wobble), (0.95, y_gap + wobble), col, dwell=2),
+        line((0.95, -y_gap + wobble), (-0.95, -y_gap - wobble), col, dwell=2),
+    ]
 
 
 # ======================================================================== SECONDARY OVERLAY LAYER
@@ -851,13 +1161,17 @@ def _morph_paths(prev_paths: list[Path], next_paths: list[Path], alpha: float) -
 
 
 SCENES = {
-    # Atmospheric Breakdown Liquid Sky & Morphing Sky presets
+    # Atmospheric Breakdown Liquid Sky & Morphing Sky presets (9 scenes)
     "liquid_sky_drift": sc_liquid_sky_drift,
     "morphing_plane_sky": sc_morphing_plane_sky,
     "breathe_horizon_sky": sc_breathe_horizon_sky,
     "velvet_sky_sweep": sc_velvet_sky_sweep,
     "silk_wave_sky": sc_silk_wave_sky,
-    # Main & Drop presets
+    "dual_horizon_mirage": sc_dual_horizon_mirage,
+    "floating_dot_constellation": sc_floating_dot_constellation,
+    "slow_v_canopy_sky": sc_slow_v_canopy_sky,
+    "aurora_sky_curtain": sc_aurora_sky_curtain,
+    # Main & Drop presets (19 scenes)
     "split_direction_sweep": sc_split_direction_sweep,
     "half_plane_stagger": sc_half_plane_stagger,
     "double_time_whip": sc_double_time_whip,
@@ -872,33 +1186,46 @@ SCENES = {
     "random_multi_blade": sc_random_multi_blade,
     "twin_scissor_sweep": sc_twin_scissor_sweep,
     "drop_x_blades": sc_drop_x_blades,
-    # Build presets
+    "quadrant_mirror_sweep": sc_quadrant_mirror_sweep,
+    "pendulum_beam_bar": sc_pendulum_beam_bar,
+    "crisscross_ribbon_planes": sc_crisscross_ribbon_planes,
+    "alternating_horizon_gates": sc_alternating_horizon_gates,
+    "prism_dot_fan": sc_prism_dot_fan,
+    "hyper_bar_ricochet": sc_hyper_bar_ricochet,
+    "horizontal_plane_blast": sc_horizontal_plane_blast,
+    "shatter_dot_storm": sc_shatter_dot_storm,
+    "quad_corner_lasers": sc_quad_corner_lasers,
+    "strobe_tunnel_ribs": sc_strobe_tunnel_ribs,
+    # Build presets (6 scenes)
     "build_converge_sweep": sc_build_converge_sweep,
     "build_rising_sheet": sc_build_rising_sheet,
     "build_prism_tighten": sc_build_prism_tighten,
+    "build_accelerating_bars": sc_build_accelerating_bars,
+    "build_dot_convergence": sc_build_dot_convergence,
+    "build_split_pinch": sc_build_split_pinch,
     # Legacy aliases
-    "tunnel": sc_multi_plane_cross_sweep,
+    "tunnel": sc_strobe_tunnel_ribs,
     "tunnel_fast": sc_double_time_whip,
     "beam_fan": sc_dotted_fan_burst,
     "starburst": sc_random_dir_sweep,
-    "starburst_fast": sc_drop_hyper_strobe,
+    "starburst_fast": sc_shatter_dot_storm,
     "lissajous": sc_split_direction_sweep,
     "scope": sc_dot_matrix_sweep,
     "spiral": sc_half_plane_stagger,
     "spiral_slow": sc_velvet_sky_sweep,
     "grid": sc_half_plane_stagger,
-    "drop_blast": sc_drop_hyper_strobe,
+    "drop_blast": sc_horizontal_plane_blast,
     "breath": sc_breathe_horizon_sky,
     "riser": sc_build_prism_tighten,
     "ring_pulse": sc_full_width_wall,
     "sky_fan": sc_morphing_plane_sky,
-    "sky_cross": sc_liquid_sky_drift,
+    "sky_cross": sc_dual_horizon_mirage,
     "scan_sweep": sc_silk_wave_sky,
     "build_fan": sc_build_converge_sweep,
     "build_scan": sc_build_rising_sheet,
     "strobe_poly": sc_drop_hyper_strobe,
-    "strobe_beams": sc_drop_hyper_strobe,
-    "strobe_burst": sc_random_multi_blade,
+    "strobe_beams": sc_hyper_bar_ricochet,
+    "strobe_burst": sc_shatter_dot_storm,
 }
 
 POOLS = {
@@ -909,13 +1236,24 @@ POOLS = {
         "dot_matrix_sweep",
         "half_time_glide",
         "full_width_wall",
+        "full_height_sheet",
         "random_dir_sweep",
         "multi_plane_cross_sweep",
         "twin_scissor_sweep",
+        "quadrant_mirror_sweep",
+        "pendulum_beam_bar",
+        "crisscross_ribbon_planes",
+        "alternating_horizon_gates",
+        "prism_dot_fan",
     ],
     DROP: [
         "drop_hyper_strobe",
         "double_time_whip",
+        "hyper_bar_ricochet",
+        "horizontal_plane_blast",
+        "shatter_dot_storm",
+        "quad_corner_lasers",
+        "strobe_tunnel_ribs",
         "split_direction_sweep",
         "random_multi_blade",
         "half_plane_stagger",
@@ -929,11 +1267,18 @@ POOLS = {
         "breathe_horizon_sky",
         "velvet_sky_sweep",
         "silk_wave_sky",
+        "dual_horizon_mirage",
+        "floating_dot_constellation",
+        "slow_v_canopy_sky",
+        "aurora_sky_curtain",
     ],
     BUILD: [
         "build_prism_tighten",
         "build_rising_sheet",
         "build_converge_sweep",
+        "build_accelerating_bars",
+        "build_dot_convergence",
+        "build_split_pinch",
     ],
     SILENCE: [],
 }
@@ -964,15 +1309,16 @@ DROP_IMPACT_BEATS = 1.5
 
 
 class FXEngine:
-    """Switches scenes every 8 or 16 beats with BPM-locked effect swaps OR colour swaps (1-1-1-2, 1-2-1-2,
-    1-1-2-2), 1-2 beat white drop impact explosions, 1-beat piano/synth white breakdown accents, smooth morph
-    transitions, and a secondary modifier layer."""
+    """Switches scenes every 8 or 16 beats with BPM-locked effect swaps (instant cut or morphed, chosen
+    at the start of the swap sequence) OR colour swaps (1-1-1-2, 1-2-1-2, 1-1-2-2), varied 1-2 beat white
+    drop impact explosions, 1-beat piano/synth white breakdown accents, and a secondary modifier layer."""
 
     def __init__(self, seed=1, force_scene=None):
         self.rng = np.random.default_rng(seed)
         self.force = force_scene
         self.section, self.scene, self.prev_scene = None, None, None
         self.swap_mode: str | None = None          # "effect", "color", or None
+        self.swap_instant: bool = False            # Decided once at start of swap sequence
         self.swap_scene: str | None = None
         self.swap_hue_offset: float = 0.2
         self.swap_seq_name: str | None = None
@@ -981,8 +1327,10 @@ class FXEngine:
         self._active_slot: int = 1
         self._slot_morph_left: float = 0.0
 
-        # Drop impact white explosion timer
+        # Drop impact white explosion timer & variant
         self._drop_impact_left: float = 0.0
+        self._drop_impact_variant: int = 0
+        self._drop_impact_bag: list[int] = []
 
         # Piano/synth melodic onset detector for 1-beat white breakdown accents
         self._melodic_avg: float = 0.0
@@ -1015,6 +1363,12 @@ class FXEngine:
         self._bags[section] = bag
         return choice
 
+    def _pick_drop_impact_variant(self) -> int:
+        if not self._drop_impact_bag:
+            self._drop_impact_bag = list(range(len(DROP_IMPACT_NAMES)))
+            self.rng.shuffle(self._drop_impact_bag)
+        return self._drop_impact_bag.pop(0)
+
     def _pick_modifier(self):
         if self.force:
             self.modifier = None
@@ -1032,8 +1386,9 @@ class FXEngine:
         self._mod_bags[self.section] = bag
 
     def _pick_swap_phrase(self, current_beat: int):
-        """Configures an 8- or 16-beat BPM-locked EFFECT swap or COLOUR swap phrase (e.g. 1-1-1-2, 1-2-1-2)."""
+        """Configures an 8- or 16-beat BPM-locked EFFECT swap (instant or morphed) or COLOUR swap phrase."""
         self.swap_mode = None
+        self.swap_instant = False
         self.swap_scene = None
         self.swap_seq_name = None
         self.swap_beats_total = 0
@@ -1053,12 +1408,13 @@ class FXEngine:
             self.rng.shuffle(self._seq_bag)
         seq_name = self._seq_bag.pop(0)
 
-        # If a specific scene is forced via CLI/GUI, always use colour swapping; otherwise alternate effect vs colour swap
-        use_color_swap = bool(self.force) or (float(self.rng.random()) < 0.50)
+        # Decide once at the start of the swap sequence whether transitions are instant cuts or morphed
+        self.swap_instant = bool(float(self.rng.random()) < 0.50)
+
+        use_color_swap = bool(self.force) or (float(self.rng.random()) < 0.45)
 
         if use_color_swap:
             self.swap_mode = "color"
-            # Jump by 1, 2, or 3 steps in PALETTES (each step is 0.1) so slot 2 uses a distinct dual-tone palette
             step = int(self.rng.integers(1, len(PALETTES)))
             self.swap_hue_offset = step * 0.1
             self.swap_seq_name = seq_name
@@ -1104,6 +1460,7 @@ class FXEngine:
             self._pick(f.beat_count)
             if f.section == DROP:
                 self._drop_impact_left = DROP_IMPACT_BEATS
+                self._drop_impact_variant = self._pick_drop_impact_variant()
                 self._morph_left = 0.0
 
         if f.beat_count != self._last_beat:
@@ -1150,15 +1507,15 @@ class FXEngine:
         if not self.scene or f.section == SILENCE:
             return [], None
 
-        # First 1-2 beats of DROP: solo pure-white dot/line explosion before switching into regular patterns
+        # First 1-2 beats of DROP: varied solo pure-white impact effect before switching into regular patterns
         if f.section == DROP and self._drop_impact_left > 0.0:
             c_drop = Ctx(f, bt, base_hue, self.rng, rt=self.rt, strobe=self.strobe_enabled, detail=self.detail)
             progress = 1.0 - (self._drop_impact_left / DROP_IMPACT_BEATS)
-            paths = _drop_white_explosion(c_drop, progress)
-            if progress > 0.75:
-                blend = (progress - 0.75) / 0.25
+            paths = _drop_impact_effect(c_drop, progress, self._drop_impact_variant)
+            if progress > 0.78:
+                blend = (progress - 0.78) / 0.22
                 paths = _morph_paths(paths, SCENES[self.scene](c_drop), blend)
-            return paths, "drop_white_explosion"
+            return paths, DROP_IMPACT_NAMES[self._drop_impact_variant]
 
         # Evaluate BPM-locked swap phrase (either "effect" swap or "color" swap)
         elapsed_beats = f.beat_count - self._swap_start_beat
@@ -1174,13 +1531,13 @@ class FXEngine:
             slot = seq[elapsed_beats % len(seq)]
             if slot != self._active_slot:
                 self._active_slot = slot
-                self._slot_morph_left = SWAP_MORPH_BEATS
+                self._slot_morph_left = 0.0 if self.swap_instant else SWAP_MORPH_BEATS
 
             if self.swap_mode == "color":
                 active_hue = base_hue if slot == 1 else (base_hue + self.swap_hue_offset)
                 c = Ctx(f, bt, active_hue, self.rng, rt=self.rt, strobe=self.strobe_enabled, detail=self.detail)
                 paths = SCENES[self.scene](c)
-                if self._slot_morph_left > 0.0:
+                if not self.swap_instant and self._slot_morph_left > 0.0:
                     prev_hue = (base_hue + self.swap_hue_offset) if slot == 1 else base_hue
                     c_prev = Ctx(f, bt, prev_hue, self.rng, rt=self.rt, strobe=self.strobe_enabled, detail=self.detail)
                     alpha = 1.0 - (self._slot_morph_left / SWAP_MORPH_BEATS)
@@ -1190,7 +1547,7 @@ class FXEngine:
                 primary_name = self.scene if slot == 1 else self.swap_scene
                 other_name = self.swap_scene if slot == 1 else self.scene
                 paths = SCENES[primary_name](c)
-                if self._slot_morph_left > 0.0 and other_name in SCENES:
+                if not self.swap_instant and self._slot_morph_left > 0.0 and other_name in SCENES:
                     alpha = 1.0 - (self._slot_morph_left / SWAP_MORPH_BEATS)
                     paths = _morph_paths(SCENES[other_name](c), paths, alpha)
         else:
@@ -1210,9 +1567,11 @@ class FXEngine:
             paths = _apply_synth_accent(paths, self._synth_accent_age, self._synth_accent_kind, c)
 
         if swap_active and self.swap_mode == "effect":
-            label = f"{self.scene}<>{self.swap_scene} [{self.swap_seq_name}]"
+            mode_tag = "cut" if self.swap_instant else "morph"
+            label = f"{self.scene}<>{self.swap_scene} [{mode_tag} {self.swap_seq_name}]"
         elif swap_active and self.swap_mode == "color":
-            label = f"{self.scene} [color {self.swap_seq_name}]"
+            mode_tag = "cut" if self.swap_instant else "morph"
+            label = f"{self.scene} [color-{mode_tag} {self.swap_seq_name}]"
         else:
             label = self.scene
 
