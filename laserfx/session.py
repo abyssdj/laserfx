@@ -17,7 +17,7 @@ from .render import SafetyLimiter, blank_frame, compose
 class Settings:
     brightness: float = 0.5
     size: float = 0.6
-    points: int = 700
+    points: int = 250             # 250 pts @ 30k pps = 120 FPS (was 700 pts = 42 FPS)
     pps: int = 30000
     flip_x: bool = False
     flip_y: bool = False
@@ -27,7 +27,7 @@ class Settings:
     blackout: bool = False
     strobe: bool = True
     detail: float = 0.5
-    min_fps: int = 30           # frame budget is capped so the picture refreshes at least this often
+    min_fps: int = 90               # frame budget is capped so the picture refreshes at least 90x/sec
 
 
 @dataclass
@@ -80,6 +80,8 @@ class Session:
         safety = SafetyLimiter()
         feats = an.features()
         last_force = object()
+        cached_log: list = []
+        last_log_len = -1
         try:
             while not self._stop.is_set() and not getattr(src, "done", False):
                 s = self.settings
@@ -93,7 +95,7 @@ class Session:
                     eng.section = feats.section
                     eng._pick()
                 eng.strobe_enabled, eng.detail = s.strobe, s.detail
-                budget = max(100, min(int(s.points), s.pps // s.min_fps))
+                budget = max(80, min(int(s.points), s.pps // max(s.min_fps, 1)))
                 paths, scene = eng.update(feats)
                 safety.brightness = s.brightness
                 if s.blackout:
@@ -103,8 +105,13 @@ class Session:
                 out.pps = s.pps
                 if hasattr(out, "flip"):
                     out.flip = dict(flip_x=s.flip_x, flip_y=s.flip_y, swap_xy=s.swap_xy)
+
+                if len(an.log) != last_log_len:
+                    cached_log = list(an.log)
+                    last_log_len = len(an.log)
+                self.snapshot = Snapshot(feats, scene, frame, safety.tripped, cached_log)
+
                 out.send(frame)
-                self.snapshot = Snapshot(feats, scene, frame, safety.tripped, list(an.log))
         except Exception as e:  # noqa: BLE001
             self.error = f"{type(e).__name__}: {e}"
         finally:
