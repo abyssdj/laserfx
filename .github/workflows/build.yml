@@ -4,19 +4,12 @@ on:
   workflow_dispatch:
 jobs:
   build:
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [windows-latest, macos-latest, ubuntu-latest]
-    runs-on: ${{ matrix.os }}
+    runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - name: Linux system packages
-        if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y python3-tk libportaudio2
       - run: pip install numpy sounddevice pyusb libusb-package pyinstaller
       - name: Smoke test (analysis + libusb backend present)
         shell: bash
@@ -28,5 +21,5 @@ jobs:
       - run: python build.py
       - uses: actions/upload-artifact@v4
         with:
-          name: LaserFX-${{ runner.os }}
+          name: LaserFX-Windows
           path: dist/*
