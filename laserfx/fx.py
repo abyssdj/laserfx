@@ -1,9 +1,10 @@
-"""Laser effects: 26 phrase-locked beam scenes, smooth preset morphing, and secondary beat-synced modifiers.
+"""Laser effects: full-width/full-height per-beat plane sweeps, random-direction multi-planes,
+smooth preset morphing, and secondary beat-synced modifiers.
 
 Coordinates are in [-1, 1]; colours are RGB in 0..1.
 Designed for a single output feeding twin projectors where Projector 2 is X-mirrored (x -> -x):
-- Deliberate X-offsets and asymmetric tilts allow Unit A and X-mirrored Unit B to sweep across
-  each other in wide stereo symmetry without overlapping onto identical beams.
+- Full-span sweeps (-0.96 -> +0.96) cross the entire field on every beat so Unit A and
+  X-mirrored Unit B sweep past each other in true wide-room stereo.
 - Patterns change cleanly every 8 or 16 beats using a non-repeating shuffle bag, with 1.5-beat
   smooth geometric morphing between presets and a secondary beat-synced modifier layer.
 """
@@ -67,19 +68,46 @@ def ray(ox, oy, ang, length=2.6):
     return (ox, oy), (ox + dx * t, oy + dy * t)
 
 
+def clipped_plane(cx: float, cy: float, angle: float, span: float = 0.96):
+    """Creates a full-span laser plane passing through (cx, cy) perpendicular to `angle`, clipped to [-span, span]."""
+    # Normal vector (nx, ny) is the sweep axis; tangent vector (-ny, nx) is the beam line
+    nx, ny = math.cos(angle), math.sin(angle)
+    tx, ty = -ny, nx
+    t_min, t_max = -4.0, 4.0
+    if abs(tx) > 1e-9:
+        t1, t2 = (-span - cx) / tx, (span - cx) / tx
+        t_min = max(t_min, min(t1, t2))
+        t_max = min(t_max, max(t1, t2))
+    if abs(ty) > 1e-9:
+        t1, t2 = (-span - cy) / ty, (span - cy) / ty
+        t_min = max(t_min, min(t1, t2))
+        t_max = min(t_max, max(t1, t2))
+    if t_max <= t_min + 0.05:
+        return None
+    return (cx + tx * t_min, cy + ty * t_min), (cx + tx * t_max, cy + ty * t_max)
+
+
 # ---------------------------------------------------------------- smooth musical motion helpers
 def smooth_wave(bt: float, period_beats: float) -> float:
     """Smooth -1..+1 cosine wave locked to exact beat multiples (4, 8, 16 beats)."""
     return -math.cos(bt * TAU / period_beats)
 
 
-def glide_step(bt: float, step_beats: float = 2.0, smoothness: float = 4.5) -> float:
-    """Smoothly glides to a new beat-locked angle every `step_beats` without jarring teleportation."""
-    x = bt / step_beats
-    idx = math.floor(x)
-    frac = x - idx
-    eased = 1.0 - math.exp(-smoothness * frac) * (1.0 - frac)
-    return idx + eased
+def beat_sweep(bt: float, beats_per_pass: float = 1.0, alternate: bool = True) -> float:
+    """Smooth 0..1 sweep across an entire beat (with optional L->R / R->L alternation)."""
+    idx = int(math.floor(bt / beats_per_pass))
+    frac = (bt / beats_per_pass) - idx
+    # Smooth sine-in-out ease across the entire beat so motion is fluid and continuous
+    u = 0.5 - 0.5 * math.cos(math.pi * frac)
+    if alternate and (idx % 2 == 1):
+        return 1.0 - u
+    return u
+
+
+def beat_hash(idx: int, salt: int = 0) -> float:
+    """Deterministic pseudo-random float in [0, 1) for beat `idx` (smooth within each beat)."""
+    v = math.sin(idx * 127.1 + salt * 311.7) * 43758.5453123
+    return v - math.floor(v)
 
 
 def beat_pump(c: Ctx) -> float:
@@ -143,12 +171,143 @@ class Ctx:
         return hsv(h_acc, max(s_acc - white_boost, 0.0), v)
 
 
-# ======================================================================== MAIN SECTION SCENES (8)
+# ======================================================================== NEW FULL-WIDTH / FULL-HEIGHT PER-BEAT SWEEP SCENES
+
+def sc_full_width_wall(c: Ctx):
+    """Tall vertical laser wall sweeping the ENTIRE width (-0.96 to +0.96) on every single beat."""
+    pump = beat_pump(c)
+    u = beat_sweep(c.bt, beats_per_pass=1.0, alternate=True)
+    # Sweeps full frame width; mirrored second projector crosses in exact opposite direction
+    x_center = -0.92 + 1.84 * u
+    # Draw a tight multi-pass thick laser blade (or dual parallel blades on high detail)
+    blades = c.count(2, 4)
+    thickness = 0.03 + 0.05 * pump
+    tilt = 0.08 * math.sin(c.bt * math.pi)
+
+    out = []
+    for i in range(blades):
+        off = (i - (blades - 1) / 2.0) * thickness
+        x0 = float(np.clip(x_center + off - tilt, -0.96, 0.96))
+        x1 = float(np.clip(x_center + off + tilt, -0.96, 0.96))
+        is_core = (i == blades // 2)
+        col = c.palette(0 if is_core else 1, v=1.0, white_boost=0.75 * pump if is_core else 0.0)
+        out.append(line(*_zig(i, (x0, -0.96), (x1, 0.96)), col, dwell=2))
+    return out
+
+
+def sc_full_height_sheet(c: Ctx):
+    """Wide horizontal Liquid Sky sheet sweeping the ENTIRE height (-0.95 to +0.95) on every beat."""
+    pump = beat_pump(c)
+    u = beat_sweep(c.bt, beats_per_pass=1.0, alternate=True)
+    y_center = -0.90 + 1.80 * u
+    # Slight non-zero slant ensures X-mirrored projector forms a giant sweeping X-blade
+    slant = 0.16 * (1.0 if int(c.bt) % 2 == 0 else -1.0)
+    blades = c.count(2, 4)
+    gap = 0.035 + 0.06 * pump
+
+    out = []
+    for i in range(blades):
+        off = (i - (blades - 1) / 2.0) * gap
+        y0 = float(np.clip(y_center + off - slant, -0.96, 0.96))
+        y1 = float(np.clip(y_center + off + slant, -0.96, 0.96))
+        is_core = (i == blades // 2)
+        col = c.palette(1 if is_core else 0, v=1.0, white_boost=0.75 * pump if is_core else 0.0)
+        out.append(line(*_zig(i, (-0.96, y0), (0.96, y1)), col, dwell=2))
+    return out
+
+
+def sc_random_dir_sweep(c: Ctx):
+    """Picks a new random sweep direction every beat (L->R, R->L, Up, Down, or Diagonals) across the whole frame."""
+    pump = beat_pump(c)
+    beat_idx = int(math.floor(c.bt))
+    frac = c.bt - beat_idx
+    # Smooth ease across the entire beat
+    u = 0.5 - 0.5 * math.cos(math.pi * frac)
+
+    # Pick one of 8 distinct sweep angles (0, 45, 90, 135, 180, 225, 270, 315 deg) per beat
+    dir_idx = int(beat_hash(beat_idx, salt=11) * 8)
+    angle = dir_idx * (TAU / 8.0)
+
+    # Sweep position travels all the way from -1.05 to +1.05 along `angle`
+    dist = -1.05 + 2.10 * u
+    cx, cy = dist * math.cos(angle), dist * math.sin(angle)
+
+    blades = c.count(2, 3)
+    spacing = 0.045 + 0.055 * pump
+    out = []
+    for i in range(blades):
+        off = (i - (blades - 1) / 2.0) * spacing
+        px = cx + off * math.cos(angle)
+        py = cy + off * math.sin(angle)
+        seg = clipped_plane(px, py, angle, span=0.96)
+        if seg is not None:
+            is_core = (i == blades // 2)
+            col = c.palette(beat_idx % 2 if is_core else (i % 2), v=1.0, white_boost=0.8 * pump if is_core else 0.0)
+            out.append(line(*_zig(i, seg[0], seg[1]), col, dwell=2))
+    return out
+
+
+def sc_multi_plane_cross_sweep(c: Ctx):
+    """Multiple wide & tall planes sweeping simultaneously in opposing directions across the entire venue."""
+    pump = beat_pump(c)
+    n_planes = c.count(2, 3)
+    u = beat_sweep(c.bt, beats_per_pass=1.0, alternate=True)
+    # Second axis sweeps at 2-beat cadence for rich polyrhythmic crossing
+    v = beat_sweep(c.bt, beats_per_pass=2.0, alternate=True)
+
+    out = []
+    idx = 0
+    # Tall vertical planes sweeping full width L<->R (staggered across the frame)
+    for i in range(n_planes):
+        phase_off = i / max(n_planes, 1)
+        pos = ((u + phase_off) % 1.0)
+        x = -0.92 + 1.84 * pos
+        col = c.palette(0, v=1.0, white_boost=0.65 * pump if i == 0 else 0.0)
+        out.append(line(*_zig(idx, (x, -0.96), (x, 0.96)), col, dwell=2))
+        idx += 1
+
+    # Wide horizontal planes sweeping full height Bottom<->Top
+    for j in range(n_planes):
+        phase_off = j / max(n_planes, 1)
+        pos = ((1.0 - v + phase_off) % 1.0)
+        y = -0.92 + 1.84 * pos
+        slant = 0.12 * (1.0 if j % 2 == 0 else -1.0)
+        y0 = float(np.clip(y - slant, -0.96, 0.96))
+        y1 = float(np.clip(y + slant, -0.96, 0.96))
+        col = c.palette(1, v=1.0, white_boost=0.65 * pump if j == 0 else 0.0)
+        out.append(line(*_zig(idx, (-0.96, y0), (0.96, y1)), col, dwell=2))
+        idx += 1
+    return out
+
+
+def sc_random_multi_blade(c: Ctx):
+    """Fires 2 to 4 independent full-frame planes on each beat, each sweeping a random angle & direction."""
+    pump = beat_pump(c)
+    beat_idx = int(math.floor(c.bt))
+    frac = c.bt - beat_idx
+    u = 0.5 - 0.5 * math.cos(math.pi * frac)
+
+    n_blades = c.count(2, 4)
+    out = []
+    for b in range(n_blades):
+        # Independent random angle and direction per blade on every beat
+        ang = beat_hash(beat_idx, salt=30 + b * 17) * TAU
+        flip = -1.0 if beat_hash(beat_idx, salt=90 + b * 13) > 0.5 else 1.0
+        dist = flip * (-1.0 + 2.0 * u)
+        cx, cy = dist * math.cos(ang), dist * math.sin(ang)
+        seg = clipped_plane(cx, cy, ang, span=0.96)
+        if seg is not None:
+            col = c.palette(b % 2, v=1.0, white_boost=0.8 * pump if b == 0 else 0.0)
+            out.append(line(*_zig(b, seg[0], seg[1]), col, dwell=2))
+    return out
+
+
+# ======================================================================== MAIN SECTION SCENES
 
 def sc_sweeping_curtain(c: Ctx):
     """Wide, fluid 8-beat sweeping beam fan that breathes open on every kick."""
     pump = beat_pump(c)
-    n = c.count(6, 10, max(c.energy, 0.45))
+    n = c.count(5, 8, max(c.energy, 0.45))
     aim = 0.24 + 0.52 * smooth_wave(c.bt, 8.0)
     spread = 0.32 + 0.24 * pump
     ox = -0.58
@@ -164,28 +323,11 @@ def sc_sweeping_curtain(c: Ctx):
     return out
 
 
-def sc_liquid_horizon(c: Ctx):
-    """Smoothly tilting 'Liquid Sky' ceiling sheet that rocks to the 4-beat bar and pulses on kicks."""
-    pump = beat_pump(c)
-    planes = c.count(2, 4, max(c.energy, 0.4))
-    tilt = 0.42 * smooth_wave(c.bt, 8.0)
-    y_center = 0.28 * smooth_wave(c.bt, 16.0)
-
-    out = []
-    for p in range(planes):
-        gap = (p - (planes - 1) / 2.0) * (0.14 + 0.16 * pump)
-        y0 = float(np.clip(y_center + gap - tilt, -0.94, 0.94))
-        y1 = float(np.clip(y_center + gap + tilt, -0.94, 0.94))
-        col = c.palette(p, v=0.9 + 0.1 * pump, white_boost=0.45 * pump if p == 0 else 0.0)
-        out.append(line(*_zig(p, (-0.96, y0), (0.96, y1)), col, dwell=2))
-    return out
-
-
 def sc_twin_scissor_sweep(c: Ctx):
     """Opposing floor and ceiling beam fans gliding smoothly in counter-phase."""
     pump = beat_pump(c)
     snare = snare_swell(c)
-    n = c.count(4, 7, max(c.energy, 0.45))
+    n = c.count(4, 6, max(c.energy, 0.45))
     swing = 0.46 * smooth_wave(c.bt, 8.0)
 
     out = []
@@ -230,47 +372,6 @@ def sc_chevron_wave(c: Ctx):
     return out
 
 
-def sc_apex_corridor(c: Ctx):
-    """Twin off-axis perspective beam corridors that glide smoothly across the venue."""
-    pump = beat_pump(c)
-    n = c.count(4, 6)
-    vp_x = -0.40 + 0.18 * smooth_wave(c.bt, 16.0)
-    vp_y = 0.20 * smooth_wave(c.bt, 8.0)
-    shift = (c.bt * 0.5) % 1.0
-    rot = (math.pi / 4.0) + 0.25 * smooth_wave(c.bt, 16.0)
-
-    out = []
-    for idx in range(n):
-        u = (idx + shift) / n
-        r = min(0.06 + 0.54 * (u ** 1.5), 0.62) * (1.0 + 0.07 * pump)
-        cx = vp_x * (1.0 - u * 0.4)
-        cy = vp_y * (1.0 - u * 0.4)
-        a = rot + np.arange(5) * TAU / 4.0
-        pts = np.stack([cx + r * np.sin(a), cy + r * np.cos(a)], 1)
-        col = c.palette(idx, v=min(1.0, u * 2.0), white_boost=0.4 * pump if idx == n - 1 else 0.0)
-        out.append(Path(pts, col, dwell=3))
-    return out
-
-
-def sc_rolling_waves(c: Ctx):
-    """Smooth undulating laser wave ribbon that rolls continuously across both projectors."""
-    pump = beat_pump(c)
-    waves = c.count(2, 3)
-    x = np.linspace(-0.95, 0.95, 56)
-    y_offset = 0.32 * smooth_wave(c.bt, 16.0)
-    amp = 0.18 + 0.16 * pump
-
-    out = []
-    for w in range(waves):
-        phase = c.bt * TAU / 4.0 + w * 1.1
-        y = np.clip(y_offset + (w - 0.5) * 0.24 + amp * np.sin(2.2 * math.pi * x + phase), -0.94, 0.94)
-        pts = np.stack([x, y], 1)
-        if w % 2 == 1:
-            pts = pts[::-1]
-        out.append(Path(pts, c.palette(w, v=1.0, white_boost=0.35 * pump if w == 0 else 0.0), dwell=0))
-    return out
-
-
 def sc_helix_ribbon(c: Ctx):
     """Intertwined double-helix laser ribbon drifting diagonally across the stereo field."""
     pump = beat_pump(c)
@@ -280,7 +381,6 @@ def sc_helix_ribbon(c: Ctx):
     out = []
     for strand in (0, 1):
         w = amp * np.sin(2.5 * math.pi * t + phase + strand * math.pi)
-        # Diagonal axis ensures X-mirrored projector forms a rich woven lattice
         x = np.clip(t * 0.85 - 0.15 + w * 0.35, -0.95, 0.95)
         y = np.clip(t * 0.72 + w * 0.85, -0.95, 0.95)
         pts = np.stack([x, y], 1)
@@ -290,43 +390,7 @@ def sc_helix_ribbon(c: Ctx):
     return out
 
 
-def sc_prism_pendulum(c: Ctx):
-    """Twin suspended beam arrays swinging like synchronized pendulums from the upper rig."""
-    pump = beat_pump(c)
-    n = c.count(5, 8, max(c.energy, 0.45))
-    swing = math.pi + 0.48 * smooth_wave(c.bt, 8.0)
-    spread = 0.28 + 0.22 * pump
-    ox = -0.52
-
-    out = []
-    for i in range(n):
-        u = (i / max(n - 1, 1)) - 0.5
-        p0, p1 = ray(ox, 0.96, swing + u * 2.0 * spread, 2.5)
-        col = c.palette(i % 2, v=1.0, white_boost=0.5 * pump if i == n // 2 else 0.0)
-        out.append(line(*_zig(i, p0, p1), col, dwell=2))
-    return out
-
-
-# ======================================================================== DROP SECTION SCENES (8)
-
-def sc_drop_power_sweep(c: Ctx):
-    """Fast 4-beat sweeping power fan that whips smoothly from side to side and flares white on kicks."""
-    pump = beat_pump(c)
-    n = c.count(6, 10, max(c.energy, 0.5))
-    aim = 0.25 + 0.62 * smooth_wave(c.bt, 4.0)
-    spread = 0.28 + 0.34 * pump
-    ox = -0.62
-
-    out = []
-    for i in range(n):
-        u = (i / max(n - 1, 1)) - 0.5
-        ang = aim + u * 2.0 * spread
-        p0, p1 = ray(ox, -0.96, ang, 2.5)
-        is_lead = (i == 0 or i == n - 1 or i == n // 2)
-        col = c.palette(1 if is_lead else (i % 2), v=1.0, white_boost=0.85 * pump if is_lead else 0.0)
-        out.append(line(*_zig(i, p0, p1), col, dwell=2))
-    return out
-
+# ======================================================================== DROP SECTION SCENES
 
 def sc_drop_x_blades(c: Ctx):
     """High-speed sweeping aerial X-sheets that slice up and down on 2-beat sweeps."""
@@ -342,62 +406,6 @@ def sc_drop_x_blades(c: Ctx):
         y1 = float(np.clip(y_sweep + gap + tilt, -0.95, 0.95))
         col = c.palette(p % 2, v=1.0, white_boost=0.8 * pump if p == 0 else 0.0)
         out.append(line(*_zig(p, (-0.96, y0), (0.96, y1)), col, dwell=2))
-    return out
-
-
-def sc_drop_fan_pump(c: Ctx):
-    """Dual-origin sweeping fans (floor + ceiling) that pump wide open on every kick."""
-    pump = beat_pump(c)
-    n = c.count(4, 7)
-    glide = glide_step(c.bt, step_beats=2.0, smoothness=5.0)
-    aim = 0.28 + 0.42 * math.sin(glide * math.pi * 0.5)
-    spread = 0.20 + 0.42 * pump
-
-    out = []
-    idx = 0
-    for i in range(n):
-        u = (i / max(n - 1, 1)) - 0.5
-        p0, p1 = ray(-0.75, -0.96, aim + u * 2.0 * spread, 2.5)
-        out.append(line(*_zig(idx, p0, p1), c.palette(0, white_boost=0.7 * pump), dwell=2))
-        idx += 1
-    for i in range(max(3, n - 1)):
-        u = (i / max(n - 2, 1)) - 0.5
-        p0, p1 = ray(-0.25, 0.96, math.pi - (aim + u * 2.0 * spread), 2.5)
-        out.append(line(*_zig(idx, p0, p1), c.palette(1, white_boost=0.7 * pump), dwell=2))
-        idx += 1
-    return out
-
-
-def sc_drop_vertical_sweep(c: Ctx):
-    """Sweeping vertical beam wall that glides back and forth across the room every 4 beats."""
-    pump = beat_pump(c)
-    n = c.count(5, 8)
-    x_center = -0.50 + 0.34 * smooth_wave(c.bt, 4.0)
-    width = 0.22 + 0.24 * pump
-
-    out = []
-    for i in range(n):
-        u = (i / max(n - 1, 1)) - 0.5
-        x = float(np.clip(x_center + u * width, -0.96, 0.96))
-        col = c.palette(i % 2, v=1.0, white_boost=0.85 * pump if i == n // 2 else 0.0)
-        out.append(line(*_zig(i, (x, -0.95), (x, 0.95)), col, dwell=2))
-    return out
-
-
-def sc_drop_arch_pulse(c: Ctx):
-    """Sweeping cathedral arch beams that fan outward from the corners on every beat."""
-    pump = beat_pump(c)
-    n = c.count(5, 9)
-    sweep = 0.35 + 0.42 * smooth_wave(c.bt, 4.0)
-    spread = 0.28 + 0.26 * pump
-
-    out = []
-    for i in range(n):
-        u = (i / max(n - 1, 1)) - 0.5
-        ang = sweep + u * 2.0 * spread
-        p0, p1 = ray(-0.92, -0.96, ang, 2.6)
-        col = c.palette(i % 2, v=1.0, white_boost=0.75 * pump if i == 0 else 0.0)
-        out.append(line(*_zig(i, p0, p1), col, dwell=2))
     return out
 
 
@@ -439,31 +447,12 @@ def sc_drop_laser_cage(c: Ctx):
     return out
 
 
-def sc_drop_double_whip(c: Ctx):
-    """Twin parallel sweeping fans originating from separate floor points, sweeping in tight unison."""
-    pump = beat_pump(c)
-    n = c.count(3, 5)
-    aim = 0.22 + 0.52 * smooth_wave(c.bt, 4.0)
-    spread = 0.20 + 0.24 * pump
-
-    out = []
-    idx = 0
-    for f_idx, ox in enumerate((-0.82, -0.28)):
-        for i in range(n):
-            u = (i / max(n - 1, 1)) - 0.5
-            p0, p1 = ray(ox, -0.96, aim + u * 2.0 * spread, 2.5)
-            col = c.palette(f_idx, v=1.0, white_boost=0.75 * pump if i == n // 2 else 0.0)
-            out.append(line(*_zig(idx, p0, p1), col, dwell=2))
-            idx += 1
-    return out
-
-
-# ======================================================================== BREAKDOWN SECTION SCENES (6)
+# ======================================================================== BREAKDOWN SECTION SCENES
 
 def sc_sky_canopy(c: Ctx):
     """Ultra-smooth 16-beat overhead canopy sweep across the venue."""
     v = 0.72 + 0.25 * c.energy
-    n = c.count(6, 10)
+    n = c.count(6, 9)
     aim = 0.28 + 0.42 * smooth_wave(c.bt, 16.0)
     spread = 0.46 + 0.18 * smooth_wave(c.bt, 8.0)
 
@@ -492,18 +481,6 @@ def sc_slow_horizon_drift(c: Ctx):
     return out
 
 
-def sc_cathedral_beams(c: Ctx):
-    """Wide corner-to-ceiling diagonal rays that sweep gently like searchlights."""
-    n = c.count(5, 8)
-    sweep = 0.45 + 0.28 * smooth_wave(c.bt, 16.0)
-    out = []
-    for i in range(n):
-        u = (i / max(n - 1, 1)) - 0.5
-        p0, p1 = ray(-0.92, -0.96, sweep + u * 0.65, 2.6)
-        out.append(line(*_zig(i, p0, p1), c.palette(i % 2, v=0.80), dwell=1))
-    return out
-
-
 def sc_aurora_ribbon(c: Ctx):
     """Slow, silky multi-layered sine waves drifting across the air."""
     x = np.linspace(-0.95, 0.95, 60)
@@ -518,37 +495,26 @@ def sc_aurora_ribbon(c: Ctx):
     return out
 
 
-def sc_halo_drift(c: Ctx):
-    """Twin off-center sweeping searchlight arcs floating smoothly across the upper canopy."""
-    n = c.count(4, 7)
-    sweep = math.pi + 0.35 * smooth_wave(c.bt, 16.0)
-    out = []
-    for i in range(n):
-        u = (i / max(n - 1, 1)) - 0.5
-        p0, p1 = ray(-0.48, 0.96, sweep + u * 0.72, 2.5)
-        out.append(line(*_zig(i, p0, p1), c.palette(i % 2, v=0.78), dwell=1))
-    return out
-
-
 def sc_velvet_curtain(c: Ctx):
-    """Slowly breathing vertical laser sheet drifting horizontally across each projector's half."""
-    n = c.count(4, 7)
-    x_center = -0.50 + 0.30 * smooth_wave(c.bt, 16.0)
-    width = 0.34 + 0.14 * smooth_wave(c.bt, 8.0)
+    """Wide vertical laser sheet sweeping slowly across the full width over 4 beats."""
+    u = beat_sweep(c.bt, beats_per_pass=4.0, alternate=True)
+    x_center = -0.88 + 1.76 * u
+    blades = c.count(3, 5)
+    width = 0.16 + 0.08 * smooth_wave(c.bt, 8.0)
     out = []
-    for i in range(n):
-        u = (i / max(n - 1, 1)) - 0.5
-        x = float(np.clip(x_center + u * width, -0.95, 0.95))
-        out.append(line(*_zig(i, (x, -0.95), (x, 0.95)), c.palette(i % 2, v=0.76), dwell=1))
+    for i in range(blades):
+        off = (i / max(blades - 1, 1) - 0.5) * width
+        x = float(np.clip(x_center + off, -0.95, 0.95))
+        out.append(line(*_zig(i, (x, -0.95), (x, 0.95)), c.palette(i % 2, v=0.78), dwell=1))
     return out
 
 
-# ======================================================================== BUILD SECTION SCENES (4)
+# ======================================================================== BUILD SECTION SCENES
 
 def sc_build_converge_sweep(c: Ctx):
     """Smoothly accelerating fan sweep that narrows into a razor-bright center beam at the drop."""
     b = c.f.build
-    n = c.count(6, 11, max(b, 0.45))
+    n = c.count(6, 10, max(b, 0.45))
     sweep = (0.50 * (1.0 - 0.65 * (b ** 2))) * math.sin(c.rt * TAU / 4.0)
     bias = 0.34 * (1.0 - 0.7 * b)
     spread = 0.50 * (1.0 - 0.78 * (b ** 2)) + 0.05
@@ -581,44 +547,29 @@ def sc_build_rising_sheet(c: Ctx):
     return out
 
 
-def sc_build_cross_accel(c: Ctx):
-    """Accelerating opposing corner sweeps that cross faster as the drop approaches."""
-    b = c.f.build
-    n = c.count(4, 7)
-    swing = 0.45 * math.sin(c.rt * TAU / 3.5)
-    out = []
-    for i in range(n):
-        u = (i / max(n - 1, 1)) - 0.5
-        p0, p1 = ray(-0.85, -0.96, 0.42 + swing + u * 0.35, 2.5)
-        col = c.palette(i % 2, v=0.75 + 0.25 * b, white_boost=0.75 * (b ** 2))
-        out.append(line(*_zig(i, p0, p1), col, dwell=1))
-    return out
-
-
 def sc_build_prism_tighten(c: Ctx):
-    """Twin vertical beam walls compressing inward toward the center line as the drop approaches."""
+    """Accelerating full-width vertical beam wall sweeping faster as the drop approaches."""
     b = c.f.build
-    n = c.count(4, 8)
-    x_center = -0.68 * (1.0 - 0.85 * (b ** 1.5))
-    width = 0.48 * (1.0 - 0.82 * (b ** 2)) + 0.04
+    u = beat_sweep(c.rt, beats_per_pass=1.0, alternate=True)
+    x_center = -0.90 + 1.80 * u
+    blades = c.count(3, 6)
+    width = 0.24 * (1.0 - 0.7 * b) + 0.04
     out = []
-    for i in range(n):
-        u = (i / max(n - 1, 1)) - 0.5
-        x = float(np.clip(x_center + u * width, -0.95, 0.95))
+    for i in range(blades):
+        off = (i / max(blades - 1, 1) - 0.5) * width
+        x = float(np.clip(x_center + off, -0.95, 0.95))
         col = c.palette(i % 2, v=0.75 + 0.25 * b, white_boost=0.85 * (b ** 2))
         out.append(line(*_zig(i, (x, -0.95), (x, 0.95)), col, dwell=2))
     return out
 
 
 # ======================================================================== SECONDARY OVERLAY LAYER
-# Periodically triggers alongside the main scene for beat-synced rotation, stereo shift, or overlays
 
 def _apply_modifier(paths: list[Path], mod: str, c: Ctx) -> list[Path]:
     if not mod or not paths:
         return paths
 
     if mod == "beat_rotate":
-        # Smooth beat-synced angular tilt rock (±22 deg on 4-beat cycle)
         ang = 0.38 * smooth_wave(c.bt, 4.0)
         ca, sa = math.cos(ang), math.sin(ang)
         out = []
@@ -630,8 +581,7 @@ def _apply_modifier(paths: list[Path], mod: str, c: Ctx) -> list[Path]:
         return out
 
     if mod == "stereo_pan_shift":
-        # Smoothly shifts X-offset across 8 beats so mirrored twin projectors sweep past each other
-        dx = 0.24 * smooth_wave(c.bt, 8.0)
+        dx = 0.22 * smooth_wave(c.bt, 8.0)
         out = []
         for p in paths:
             pts = p.pts.copy()
@@ -640,7 +590,6 @@ def _apply_modifier(paths: list[Path], mod: str, c: Ctx) -> list[Path]:
         return out
 
     if mod == "kick_zoom_pump":
-        # Smooth radial breathing expansion on bass kicks
         pump = beat_pump(c)
         scale = 0.86 + 0.16 * pump
         out = []
@@ -649,19 +598,14 @@ def _apply_modifier(paths: list[Path], mod: str, c: Ctx) -> list[Path]:
             out.append(Path(pts, p.rgb, p.dwell))
         return out
 
-    if mod == "accent_ceiling_ray":
-        # Adds a sparse counter-sweeping overhead accent fan in the secondary festival color
-        pump = beat_pump(c)
-        swing = math.pi - (0.35 + 0.45 * smooth_wave(c.bt, 8.0))
-        extra = []
-        for i in range(3):
-            u = (i - 1) * (0.22 + 0.12 * pump)
-            p0, p1 = ray(-0.22, 0.96, swing + u, 2.4)
-            extra.append(line(*_zig(i, p0, p1), c.palette(1, v=0.85, white_boost=0.45 * pump), dwell=1))
+    if mod == "counter_sweep_plane":
+        # Adds a contrasting full-height horizontal sheet sweeping opposite to the main scene
+        u = beat_sweep(c.bt + 0.5, beats_per_pass=1.0, alternate=True)
+        y = -0.88 + 1.76 * u
+        extra = [line((-0.96, y), (0.96, y), c.palette(1, v=0.9, white_boost=0.5 * beat_pump(c)), dwell=2)]
         return paths + extra
 
     if mod == "hat_packet_chop":
-        # Slices straight 2-point beams into gliding light packets when hi-hat flux is active
         if c.hi < 0.35:
             return paths
         out = []
@@ -678,7 +622,6 @@ def _apply_modifier(paths: list[Path], mod: str, c: Ctx) -> list[Path]:
 # ======================================================================== SMOOTH PRESET MORPHING
 
 def _resample_poly(pts: np.ndarray, k: int) -> np.ndarray:
-    """Resamples a polyline to `k` evenly spaced vertices so arbitrary paths can morph smoothly."""
     if len(pts) == k:
         return pts.copy()
     if len(pts) < 2:
@@ -695,12 +638,10 @@ def _resample_poly(pts: np.ndarray, k: int) -> np.ndarray:
 
 
 def _morph_paths(prev_paths: list[Path], next_paths: list[Path], alpha: float) -> list[Path]:
-    """Smoothly interpolates geometry and color between outgoing and incoming scenes."""
     if not prev_paths:
         return next_paths
     if not next_paths:
         return prev_paths
-    # Smoothstep S-curve for fluid galvo transitions
     t = alpha * alpha * (3.0 - 2.0 * alpha)
     n_out = max(len(prev_paths), len(next_paths))
     morphed = []
@@ -721,110 +662,95 @@ def _morph_paths(prev_paths: list[Path], next_paths: list[Path], alpha: float) -
 
 
 SCENES = {
-    # MAIN (8)
+    # Full-width / full-height per-beat plane sweepers
+    "full_width_wall": sc_full_width_wall,
+    "full_height_sheet": sc_full_height_sheet,
+    "random_dir_sweep": sc_random_dir_sweep,
+    "multi_plane_cross_sweep": sc_multi_plane_cross_sweep,
+    "random_multi_blade": sc_random_multi_blade,
+    # Complementary spatial & structural scenes
     "sweeping_curtain": sc_sweeping_curtain,
-    "liquid_horizon": sc_liquid_horizon,
     "twin_scissor_sweep": sc_twin_scissor_sweep,
     "chevron_wave": sc_chevron_wave,
-    "apex_corridor": sc_apex_corridor,
-    "rolling_waves": sc_rolling_waves,
     "helix_ribbon": sc_helix_ribbon,
-    "prism_pendulum": sc_prism_pendulum,
-    # DROP (8)
-    "drop_power_sweep": sc_drop_power_sweep,
     "drop_x_blades": sc_drop_x_blades,
-    "drop_fan_pump": sc_drop_fan_pump,
-    "drop_vertical_sweep": sc_drop_vertical_sweep,
-    "drop_arch_pulse": sc_drop_arch_pulse,
     "drop_saw_slash": sc_drop_saw_slash,
     "drop_laser_cage": sc_drop_laser_cage,
-    "drop_double_whip": sc_drop_double_whip,
-    # BREAKDOWN (6)
     "sky_canopy": sc_sky_canopy,
     "slow_horizon_drift": sc_slow_horizon_drift,
-    "cathedral_beams": sc_cathedral_beams,
     "aurora_ribbon": sc_aurora_ribbon,
-    "halo_drift": sc_halo_drift,
     "velvet_curtain": sc_velvet_curtain,
-    # BUILD (4)
     "build_converge_sweep": sc_build_converge_sweep,
     "build_rising_sheet": sc_build_rising_sheet,
-    "build_cross_accel": sc_build_cross_accel,
     "build_prism_tighten": sc_build_prism_tighten,
-    # Legacy aliases for CLI / saved sessions
-    "tunnel": sc_apex_corridor,
-    "tunnel_fast": sc_drop_power_sweep,
-    "beam_fan": sc_sweeping_curtain,
-    "starburst": sc_drop_fan_pump,
-    "starburst_fast": sc_drop_power_sweep,
+    # Legacy aliases
+    "tunnel": sc_multi_plane_cross_sweep,
+    "tunnel_fast": sc_random_multi_blade,
+    "beam_fan": sc_full_width_wall,
+    "starburst": sc_random_dir_sweep,
+    "starburst_fast": sc_random_multi_blade,
     "lissajous": sc_helix_ribbon,
-    "scope": sc_rolling_waves,
+    "scope": sc_aurora_ribbon,
     "spiral": sc_chevron_wave,
-    "spiral_slow": sc_aurora_ribbon,
+    "spiral_slow": sc_velvet_curtain,
     "grid": sc_drop_laser_cage,
-    "drop_blast": sc_drop_double_whip,
-    "breath": sc_sky_canopy,
-    "riser": sc_build_converge_sweep,
-    "ring_pulse": sc_apex_corridor,
+    "drop_blast": sc_random_multi_blade,
+    "breath": sc_full_height_sheet,
+    "riser": sc_build_prism_tighten,
+    "ring_pulse": sc_full_width_wall,
     "sky_fan": sc_sky_canopy,
-    "sky_cross": sc_cathedral_beams,
-    "scan_sweep": sc_slow_horizon_drift,
+    "sky_cross": sc_slow_horizon_drift,
+    "scan_sweep": sc_full_height_sheet,
     "build_fan": sc_build_converge_sweep,
     "build_scan": sc_build_rising_sheet,
     "strobe_poly": sc_drop_x_blades,
-    "strobe_beams": sc_drop_vertical_sweep,
-    "strobe_burst": sc_drop_arch_pulse,
+    "strobe_beams": sc_full_width_wall,
+    "strobe_burst": sc_random_multi_blade,
 }
 
 POOLS = {
     MAIN: [
+        "full_width_wall",
+        "full_height_sheet",
+        "random_dir_sweep",
+        "multi_plane_cross_sweep",
         "sweeping_curtain",
-        "liquid_horizon",
         "twin_scissor_sweep",
         "chevron_wave",
-        "apex_corridor",
-        "rolling_waves",
         "helix_ribbon",
-        "prism_pendulum",
     ],
     DROP: [
-        "drop_power_sweep",
+        "random_multi_blade",
+        "multi_plane_cross_sweep",
+        "full_width_wall",
+        "random_dir_sweep",
         "drop_x_blades",
-        "drop_fan_pump",
-        "drop_vertical_sweep",
-        "drop_arch_pulse",
         "drop_saw_slash",
         "drop_laser_cage",
-        "drop_double_whip",
     ],
     BREAKDOWN: [
-        "sky_canopy",
-        "slow_horizon_drift",
-        "cathedral_beams",
-        "aurora_ribbon",
-        "halo_drift",
         "velvet_curtain",
+        "full_height_sheet",
+        "slow_horizon_drift",
+        "sky_canopy",
+        "aurora_ribbon",
     ],
     BUILD: [
-        "build_converge_sweep",
-        "build_rising_sheet",
-        "build_cross_accel",
         "build_prism_tighten",
+        "build_rising_sheet",
+        "build_converge_sweep",
     ],
     SILENCE: [],
 }
 
 MODIFIER_POOLS = {
-    MAIN: ["beat_rotate", "stereo_pan_shift", "kick_zoom_pump", "accent_ceiling_ray", "hat_packet_chop"],
-    DROP: ["beat_rotate", "kick_zoom_pump", "accent_ceiling_ray", "hat_packet_chop", "stereo_pan_shift"],
-    BREAKDOWN: ["beat_rotate", "stereo_pan_shift", "accent_ceiling_ray"],
+    MAIN: ["beat_rotate", "stereo_pan_shift", "kick_zoom_pump", "counter_sweep_plane", "hat_packet_chop"],
+    DROP: ["beat_rotate", "kick_zoom_pump", "counter_sweep_plane", "hat_packet_chop"],
+    BREAKDOWN: ["beat_rotate", "stereo_pan_shift"],
     BUILD: ["kick_zoom_pump"],
     SILENCE: [],
 }
 
-# 4 beats per bar:
-# - MAIN & BREAKDOWN switch every 4 bars = 16 beats
-# - DROP & BUILD switch every 2 bars = 8 beats
 BARS_PER_SCENE = {MAIN: 4, DROP: 2, BREAKDOWN: 4, BUILD: 2, SILENCE: 99}
 MORPH_BEATS = 1.5
 
@@ -848,7 +774,6 @@ class FXEngine:
             self.modifier = None
             return
         pool = MODIFIER_POOLS.get(self.section, [])
-        # Trigger the secondary modifier ~55% of phrases in MAIN/DROP, ~35% in BREAKDOWN/BUILD
         chance = 0.55 if self.section in (MAIN, DROP) else 0.35
         if not pool or float(self.rng.random()) > chance:
             self.modifier = None
