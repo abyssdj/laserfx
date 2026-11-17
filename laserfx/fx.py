@@ -1,7 +1,8 @@
 """LaserFX Effect Engine: coherent aerial choreography (Laser Sky, Tunnels, Cones, Crowns,
-Lissajous, Helix Waves, Hot-Beam Matrices, Wide-Coverage Blackout Chasers, Single-Pass Beaded
-Planes, Mirrored-Pair Beam Chases), transient-triggered white Breakdown bursts, color-theory
-harmony palettes, Art-Net RGB override, and vectorized path sorting.
+Lissajous, Helix Waves, Hot-Beam Matrices, Snake Chasers, Starfield Warps, Circle-Grid
+Blackout Chasers, Single-Pass Beaded Planes, Mirrored-Pair Beam Chases), transient-triggered
+white Breakdown bursts, color-theory harmony palettes, Art-Net RGB override, and vectorized
+path sorting.
 """
 from __future__ import annotations
 
@@ -153,7 +154,6 @@ def _apply_split_color_harmony(
             c_b = palette[(idx + 1) % n_cols]
             u = np.linspace(0.0, 1.0, len(arr))[:, None]
             grad = (c_a * (1.0 - u) + c_b * u) * lum
-            # Preserve embedded white-hot beads along beaded paths
             is_white_bead = (sat < 0.12) & (lum > 0.01)
             final_rgb = np.where(is_white_bead, WHITE * lum, grad)
             out.append(Path(p.pts, np.clip(final_rgb, 0.0, 1.0), p.dwell))
@@ -206,12 +206,10 @@ def beaded_line(
     if seg_len < 0.18 or n <= 0:
         return Path(np.array([p0, p1], dtype=float), c_line, dwell=0)
 
-    # Keep beads evenly spaced and inset from endpoints so corners/edges stay clean
     span = max(1.0 - 2.0 * margin, 0.25)
     u = ((np.arange(n, dtype=float) + 0.5 + (phase % 1.0)) / n) % 1.0
     ts = np.sort(margin + u * span)
 
-    # Deduplicate any beads that wrap close together
     filtered_ts: list[float] = []
     min_gap = 0.06 / max(seg_len, 0.25)
     for t in ts:
@@ -224,7 +222,6 @@ def beaded_line(
 
     for t in filtered_ts:
         pt = p0 + vec * t
-        # Snap color to white at the exact coordinate, dwell stationary, then restore beam color
         pts_list.append(pt)
         rgb_list.append(c_line)
         for _ in range(dwell_reps):
@@ -833,6 +830,311 @@ def _apply_breakdown_transient_burst(
             extra.append(line((px - tilt, -LIM), (px + tilt, LIM), col_primary if i == 1 else col_secondary, dwell=0))
 
     return paths + extra
+
+
+# ======================================================================== SNAKE-STYLE CHASING EFFECTS
+
+def _serpentine_point(u: float, rows: int = 4, span_x: float = 0.84, span_y: float = 0.78) -> tuple[float, float]:
+    """Map continuous progress u in [0, 1] along a smooth boustrophedon (serpentine) sweep."""
+    u = u % 1.0
+    total = float(rows)
+    pos = u * total
+    row_idx = min(int(math.floor(pos)), rows - 1)
+    local_t = pos - row_idx
+    eased_t = 0.5 - 0.5 * math.cos(math.pi * local_t)
+    dir_x = 1.0 if (row_idx % 2 == 0) else -1.0
+    x = dir_x * (-span_x + 2.0 * span_x * eased_t)
+    row_u = row_idx / max(rows - 1, 1)
+    # Smoothly transition Y near the end of each row so the snake rounds corners cleanly
+    turn_blend = max(0.0, (local_t - 0.82) / 0.18)
+    next_row_u = ((row_idx + 1) % rows) / max(rows - 1, 1)
+    if row_idx < rows - 1:
+        y_u = row_u * (1.0 - turn_blend) + next_row_u * turn_blend
+    else:
+        y_u = row_u
+    y = span_y - 2.0 * span_y * y_u
+    return x, y
+
+
+def _build_snake_path(
+    head_u: float,
+    tail_len: float,
+    segments: int,
+    rows: int,
+    col_head: np.ndarray,
+    col_tail: np.ndarray,
+    wobble_phase: float = 0.0,
+    mirror_xy: bool = False,
+) -> Path:
+    """Single continuous polyline snake with a white-hot head and fading color-mapped body."""
+    us = np.linspace(head_u - tail_len, head_u, segments)
+    pts = np.zeros((segments, 2), dtype=float)
+    for idx, u in enumerate(us):
+        # Ping-pong u over [0, 1] so the snake reverses smoothly at top and bottom rows
+        cycle = u % 2.0
+        mapped_u = cycle if cycle <= 1.0 else (2.0 - cycle)
+        x, y = _serpentine_point(mapped_u, rows=rows)
+        y += 0.045 * math.sin(u * 18.0 + wobble_phase)
+        if mirror_xy:
+            x, y = -x, -y
+        pts[idx, 0] = np.clip(x, -LIM, LIM)
+        pts[idx, 1] = np.clip(y, -LIM, LIM)
+
+    t = np.linspace(0.0, 1.0, segments)[:, None]
+    fade = 0.14 + 0.86 * (t ** 1.35)
+    rgb = (col_tail[None, :] * (1.0 - t) + col_head[None, :] * t) * fade
+    # Make the very tip of the snake head white-hot
+    rgb[-1] = WHITE
+    if segments >= 3:
+        rgb[-2] = np.clip(col_head * 0.35 + WHITE * 0.65, 0.0, 1.0)
+    return Path(pts, np.clip(rgb, 0.0, 1.0), dwell=1)
+
+
+def sc_snake_serpentine_chase(c: Ctx) -> list[Path]:
+    """Slithering aerial laser snake weaving across 4 wide horizontal lanes with a glowing head."""
+    pump = beat_pump(c)
+    head_u = c.bt * 0.22
+    tail_len = 0.28 + 0.08 * pump
+    segs = c.count(16, 22)
+    col_head = c.palette(0, v=1.0, white_boost=0.45 * pump)
+    col_tail = c.palette(1, v=0.90)
+    return [
+        _build_snake_path(head_u, tail_len, segs, rows=4, col_head=col_head, col_tail=col_tail, wobble_phase=c.bt * 3.0)
+    ]
+
+
+def sc_twin_snake_chase(c: Ctx) -> list[Path]:
+    """Dual counter-chasing laser snakes weaving in opposite directions across the full field."""
+    pump = beat_pump(c)
+    head_u = c.bt * 0.26
+    tail_len = 0.24 + 0.06 * pump
+    segs = c.count(14, 18)
+    s1 = _build_snake_path(
+        head_u,
+        tail_len,
+        segs,
+        rows=4,
+        col_head=c.palette(0, v=1.0, white_boost=0.4 * pump),
+        col_tail=c.palette(1, v=0.88),
+        wobble_phase=c.bt * 3.5,
+        mirror_xy=False,
+    )
+    s2 = _build_snake_path(
+        head_u + 0.15,
+        tail_len,
+        segs,
+        rows=4,
+        col_head=c.palette(2, v=1.0, white_boost=0.4 * pump),
+        col_tail=c.palette(3, v=0.88),
+        wobble_phase=-c.bt * 3.5,
+        mirror_xy=True,
+    )
+    return [s1, s2]
+
+
+# ======================================================================== STARFIELD CHASE EFFECTS
+
+def sc_starfield_warp_chase(c: Ctx) -> list[Path]:
+    """3D hyperspace starfield chase: stars accelerate outward from a drifting vanishing point
+    with short radial motion streaks and bright white-hot star heads."""
+    pump = beat_pump(c)
+    n_stars = c.count(12, 18)
+    vx = 0.22 * smooth_wave(c.bt, 12.0)
+    vy = 0.16 * smooth_wave(c.bt, 16.0)
+    speed = 0.65 + 0.35 * c.energy
+    out: list[Path] = []
+    golden = 2.39996323  # golden-angle distribution for uniform radial coverage
+
+    for i in range(n_stars):
+        ang = i * golden + 0.18 * smooth_wave(c.bt, 24.0)
+        z = (c.bt * speed + (i / max(n_stars, 1))) % 1.0
+        # Exponential depth projection so stars accelerate as they near the viewer
+        r_head = 0.05 + 1.18 * (z ** 1.85)
+        r_tail = max(0.03, r_head - (0.04 + 0.16 * (z ** 1.5) * (0.7 + 0.3 * pump)))
+        dx, dy = math.cos(ang), math.sin(ang)
+        hx, hy = vx + dx * r_head, vy + dy * r_head
+        if abs(hx) > LIM or abs(hy) > LIM:
+            continue
+        tx, ty = vx + dx * r_tail, vy + dy * r_tail
+        lum = min(1.0, 0.25 + 0.95 * z)
+        if z > 0.62 and c.detail >= 0.35:
+            col = c.palette(i, v=lum, white_boost=0.45 * z)
+            out.append(Path(
+                np.array([[tx, ty], [hx, hy], [hx, hy]], dtype=float),
+                np.array([col * 0.45, WHITE * lum, WHITE * lum], dtype=float),
+                dwell=1,
+            ))
+        else:
+            out.append(hot_dot((hx, hy), WHITE * lum if i % 2 == 0 else c.palette(i, v=lum, white_boost=0.6), dwell=4))
+    return out
+
+
+def sc_starfield_spiral_step(c: Ctx) -> list[Path]:
+    """ILDA-style Dot Spiral Step chase: rotating spiral arms of high-dwell stars pulsing on 8ths."""
+    pump = beat_pump(c)
+    arms = c.count(3, 4)
+    stars_per_arm = c.count(3, 4)
+    step = int(math.floor(c.bt * 2.0))
+    base_rot = c.bt * 0.65 + (step % 4) * 0.22
+    out: list[Path] = []
+    for a in range(arms):
+        arm_ang = base_rot + (a / arms) * TAU
+        for s in range(stars_per_arm):
+            u = (s + 0.5) / stars_per_arm
+            rad = (0.16 + 0.72 * u) * (0.92 + 0.10 * pump)
+            twist = arm_ang + u * 1.35
+            px = rad * math.cos(twist)
+            py = rad * 0.92 * math.sin(twist)
+            active = ((s + step) % stars_per_arm) == 0
+            col = WHITE if active else c.palette(a + s, v=0.68 + 0.32 * pump, white_boost=0.55 if active else 0.20)
+            out.append(hot_dot((px, py), col, dwell=5 if active else 4))
+    return out
+
+
+# ======================================================================== GRID OF CIRCLES BLACKOUT CHASING (WIDE COVERAGE)
+
+def _grid_circle(cx: float, cy: float, r: float, rgb, rot: float = 0.0) -> Path:
+    return polygon_path(cx, cy, r, r * 0.92, 14, rot, rgb)
+
+
+def sc_circle_grid_blackout_chase(c: Ctx) -> list[Path]:
+    """Wide-coverage 4x3 circle grid blackout chase: hops across spatial zones (rows, columns,
+    diagonals, perimeter vs. core) with crisp blackout gaps between steps."""
+    step_f = c.bt * 4.0
+    step = int(math.floor(step_f))
+    if (step_f - step) > 0.58:
+        return []
+
+    pump = beat_pump(c)
+    cols, rows = 4, 3
+    xs = np.linspace(-0.74, 0.74, cols)
+    ys = np.linspace(0.66, -0.66, rows)
+    rad = 0.16 + 0.035 * pump
+    rot = c.bt * 0.9
+
+    pattern = step % 8
+    active_cells: list[tuple[int, int]] = []
+    if pattern == 0:
+        # Top row full wide span
+        active_cells = [(ci, 0) for ci in range(cols)]
+    elif pattern == 1:
+        # Bottom row full wide span
+        active_cells = [(ci, 2) for ci in range(cols)]
+    elif pattern == 2:
+        # Outer left & right columns
+        active_cells = [(0, ri) for ri in range(rows)] + [(3, ri) for ri in range(rows)]
+    elif pattern == 3:
+        # Inner center columns
+        active_cells = [(1, ri) for ri in range(rows)] + [(2, ri) for ri in range(rows)]
+    elif pattern == 4:
+        # Four extreme corners
+        active_cells = [(0, 0), (3, 0), (3, 2), (0, 2)]
+    elif pattern == 5:
+        # Wide X-cross across the grid
+        active_cells = [(0, 0), (1, 1), (2, 1), (3, 2), (3, 0), (0, 2)]
+    elif pattern == 6:
+        # Middle horizontal row
+        active_cells = [(ci, 1) for ci in range(cols)]
+    else:
+        # Perimeter ring around the grid
+        active_cells = [(0, 0), (1, 0), (2, 0), (3, 0), (3, 1), (3, 2), (2, 2), (1, 2), (0, 2), (0, 1)]
+
+    # Cap simultaneously lit circles to keep scanner refresh fast and crisp
+    max_circles = c.count(4, 6)
+    if len(active_cells) > max_circles:
+        stride = max(1, len(active_cells) // max_circles)
+        offset = (step // 8) % stride
+        active_cells = active_cells[offset::stride][:max_circles]
+
+    out: list[Path] = []
+    for idx, (ci, ri) in enumerate(active_cells):
+        col = c.palette(step + idx, v=1.0, white_boost=0.62 * pump if idx % 2 == 0 else 0.25)
+        out.append(_grid_circle(float(xs[ci]), float(ys[ri]), rad, col, rot=rot + idx * 0.3))
+    return out
+
+
+def sc_circle_checkerboard_blackout(c: Ctx) -> list[Path]:
+    """3x3 wide-coverage circle checkerboard blackout relay alternating odd/even grid cells at 8ths."""
+    step_f = c.bt * 2.0
+    step = int(math.floor(step_f))
+    if (step_f - step) > 0.62:
+        return []
+
+    pump = beat_pump(c)
+    xs = (-0.68, 0.0, 0.68)
+    ys = (0.64, 0.0, -0.64)
+    rad = 0.21 + 0.045 * pump
+    parity = step % 2
+    out: list[Path] = []
+    idx = 0
+    for ri, y in enumerate(ys):
+        for ci, x in enumerate(xs):
+            if (ri + ci) % 2 != parity:
+                continue
+            col = c.palette(step + idx, v=1.0, white_boost=0.65 * pump if idx == 0 else 0.20)
+            out.append(_grid_circle(x, y, rad, col, rot=c.bt * (0.8 if parity == 0 else -0.8)))
+            idx += 1
+    return out
+
+
+# ======================================================================== ADDITIONAL ILDA-INSPIRED BEAM ANIMATIONS
+
+def sc_dot_grid_relay(c: Ctx) -> list[Path]:
+    """120-BPM ILDA-inspired Dot Grid Relay: crisp ranks of white-hot aerial dots alternating
+    between horizontal rows, vertical columns, and wide diagonals with blackout gaps."""
+    step_f = c.bt * 2.0
+    step = int(math.floor(step_f))
+    if (step_f - step) > 0.68:
+        return []
+
+    pump = beat_pump(c)
+    n_dots = c.count(4, 5)
+    coords = np.linspace(-0.78, 0.78, n_dots)
+    mode = step % 4
+    out: list[Path] = []
+
+    if mode == 0:
+        for y in (-0.62, 0.62):
+            for i, x in enumerate(coords):
+                out.append(hot_dot((float(x), y), WHITE if i % 2 == 0 else c.palette(0, white_boost=0.7), dwell=5))
+    elif mode == 1:
+        for x in (-0.72, 0.72):
+            for i, y in enumerate(coords):
+                out.append(hot_dot((x, float(y)), WHITE if i % 2 == 0 else c.palette(1, white_boost=0.7), dwell=5))
+    elif mode == 2:
+        for i, u in enumerate(coords):
+            out.append(hot_dot((float(u), float(u) * 0.88), WHITE if i % 2 == 0 else c.palette(2, white_boost=0.7), dwell=5))
+            out.append(hot_dot((float(u), -float(u) * 0.88), c.palette(3, white_boost=0.65), dwell=5))
+    else:
+        r = 0.56 + 0.18 * pump
+        for i in range(n_dots * 2):
+            ang = c.bt * 0.8 + (i / (n_dots * 2)) * TAU
+            out.append(hot_dot((r * math.cos(ang), r * 0.88 * math.sin(ang)), WHITE if i % 2 == 0 else c.palette(i, white_boost=0.7), dwell=5))
+    return out
+
+
+def sc_prism_beam_fountain(c: Ctx) -> list[Path]:
+    """Sweeping aerial fountain of 3–4 single-pass beaded shafts rising from a moving base pivot."""
+    pump = beat_pump(c)
+    n_shafts = c.count(3, 4)
+    ox = 0.42 * smooth_wave(c.bt, 8.0)
+    spread = 0.48 + 0.24 * smooth_wave(c.bt, 4.0)
+    out: list[Path] = []
+    for i in range(n_shafts):
+        u = (i / max(n_shafts - 1, 1)) - 0.5
+        ang = u * spread * 2.0 + 0.14 * smooth_wave(c.bt, 6.0)
+        p0, p1 = ray(ox, -0.88, ang, length=2.4)
+        col = c.palette(i, v=0.86 + 0.14 * pump)
+        out.append(beaded_line(
+            p0,
+            p1,
+            line_rgb=col,
+            bead_rgb=WHITE,
+            count=c.count(3, 4),
+            bead_dwell=4,
+            phase=c.bt * 0.35 + i * 0.2,
+        ))
+    return out
 
 
 # ======================================================================== RAPID WIDE-COVERAGE BLACKOUT CHASING EFFECTS
@@ -1744,7 +2046,6 @@ def _apply_modifier(paths: list[Path], mod: str, c: Ctx) -> list[Path]:
         return paths
 
     if mod == "plane_dwell_beads":
-        # Upgrade existing straight beam lines in-place into single-pass beaded paths
         n_beads = c.count(3, 5)
         out: list[Path] = []
         beaded_lines = 0
@@ -1889,6 +2190,18 @@ def _morph_paths(prev_paths: list[Path], next_paths: list[Path], alpha: float) -
 
 
 SCENES = {
+    # Snake-Style Chasers
+    "snake_serpentine_chase": sc_snake_serpentine_chase,
+    "twin_snake_chase": sc_twin_snake_chase,
+    # Starfield Chasers
+    "starfield_warp_chase": sc_starfield_warp_chase,
+    "starfield_spiral_step": sc_starfield_spiral_step,
+    # Grid of Circles Blackout Chasers
+    "circle_grid_blackout_chase": sc_circle_grid_blackout_chase,
+    "circle_checkerboard_blackout": sc_circle_checkerboard_blackout,
+    # Additional ILDA-Inspired Animated Beam Effects
+    "dot_grid_relay": sc_dot_grid_relay,
+    "prism_beam_fountain": sc_prism_beam_fountain,
     # Mirrored-Pair Beam Chases & Sweeping Bars
     "beat_bar_sweep": sc_beat_bar_sweep,
     "bar_chase_lanes": sc_bar_chase_lanes,
@@ -1985,18 +2298,26 @@ SCENES = {
 }
 
 QUICK_CUES: list[tuple[str, str]] = [
+    ("snake_serpentine_chase", "Snake Chase"),
+    ("starfield_warp_chase", "Starfield"),
+    ("circle_grid_blackout_chase", "Circle Grid"),
+    ("dot_grid_relay", "Dot Relay"),
     ("beaded_sky_canopy", "Beaded Sky"),
-    ("beaded_horizon_planes", "Beaded Planes"),
     ("scissor_snap", "Scissor Snap"),
     ("blackout_zone_chase", "Blackout Chase"),
-    ("beam_chase_diagonals", "Diag Chase"),
-    ("perimeter_comet", "Comet Frame"),
-    ("chevron_run", "Chevrons"),
-    ("eq_bars", "EQ Bars"),
+    ("prism_beam_fountain", "Beam Fountain"),
 ]
 
 POOLS = {
     MAIN: [
+        "snake_serpentine_chase",
+        "twin_snake_chase",
+        "starfield_warp_chase",
+        "starfield_spiral_step",
+        "circle_grid_blackout_chase",
+        "circle_checkerboard_blackout",
+        "dot_grid_relay",
+        "prism_beam_fountain",
         "beat_bar_sweep",
         "bar_chase_lanes",
         "beam_chase_diagonals",
@@ -2033,6 +2354,13 @@ POOLS = {
         "alternating_horizon_gates",
     ],
     DROP: [
+        "twin_snake_chase",
+        "starfield_warp_chase",
+        "starfield_spiral_step",
+        "circle_grid_blackout_chase",
+        "circle_checkerboard_blackout",
+        "dot_grid_relay",
+        "prism_beam_fountain",
         "drop_lane_chase",
         "drop_chevron_run",
         "scissor_snap",
@@ -2064,6 +2392,7 @@ POOLS = {
         "drop_x_blades",
     ],
     BREAKDOWN: [
+        "starfield_spiral_step",
         "beaded_sky_canopy",
         "liquid_sky_drift",
         "cathedral_sky_vault",
@@ -2117,9 +2446,9 @@ DROP_IMPACT_BEATS = 1.5
 
 
 class FXEngine:
-    """High-FPS FX engine with Laser Sky, single-pass embedded beaded planes, mirrored-pair beam
-    chases, transient-triggered white Breakdown bursts, rapid wide-coverage blackout chasers,
-    Color-Theory Harmony Palettes & Art-Net RGB override."""
+    """High-FPS FX engine with Laser Sky, single-pass embedded beaded planes, snake chasers,
+    starfield warps, wide-coverage circle-grid blackout chasers, mirrored-pair beam chases,
+    transient-triggered white Breakdown bursts, Color-Theory Harmony Palettes & Art-Net RGB override."""
 
     def __init__(self, seed: int = 1, force_scene: str | None = None):
         self.rng = np.random.default_rng(seed)
