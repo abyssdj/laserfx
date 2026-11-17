@@ -1,7 +1,7 @@
 """LaserFX Effect Engine: coherent aerial choreography (Laser Sky, Tunnels, Cones, Crowns,
-Lissajous, Helix Waves, Hot-Beam Matrices, Wide-Coverage Blackout Chasers, Beaded Planes),
-randomized per-beat Breakdown bursts, color-theory harmony palettes, Art-Net RGB override,
-and nearest-neighbor path sorting.
+Lissajous, Helix Waves, Hot-Beam Matrices, Wide-Coverage Blackout Chasers, Beaded Planes,
+Mirrored-Pair Beam Chases), randomized per-beat Breakdown bursts, color-theory harmony palettes,
+Art-Net RGB override, and nearest-neighbor path sorting.
 """
 from __future__ import annotations
 
@@ -124,10 +124,14 @@ def _apply_split_color_harmony(paths: list[Path], palette: list[np.ndarray], art
                 out.append(p)
                 continue
             sat = float((arr.max() - arr.min()) / max(lum, 1e-6))
-            if sat < 0.22 and lum > 0.65 and (artnet is None or not artnet.connected):
+            # Preserve white-hot / high-dwell beam cores so they punch visibly through colored planes
+            if (sat < 0.35 or p.dwell >= 4) and lum > 0.65 and (artnet is None or not artnet.connected):
                 out.append(p)
                 continue
             target = palette[idx % n_cols] * lum
+            if sat < 0.55:
+                white_mix = (0.55 - sat) / 0.55
+                target = target * (1.0 - 0.65 * white_mix) + (WHITE * lum) * (0.65 * white_mix)
             out.append(Path(p.pts, np.clip(target, 0.0, 1.0), p.dwell))
         else:
             lum = np.max(arr, axis=1, keepdims=True)
@@ -145,11 +149,19 @@ def line(a, b, rgb, dwell: int = 0) -> Path:
     return Path(np.array([a, b], dtype=float), rgb, dwell)
 
 
-def hot_dot(pt, rgb=WHITE, dwell: int = 2) -> Path:
+def hot_dot(pt, rgb=WHITE, dwell: int = 5) -> Path:
+    """High-dwell, white-core aerial hot point that renders crisply over planes and in haze."""
     x = float(np.clip(pt[0], -LIM, LIM))
     y = float(np.clip(pt[1], -LIM, LIM))
-    dx = 0.006 if x < (LIM - 0.02) else -0.006
-    return Path(np.array([[x, y], [x + dx, y]], dtype=float), rgb, dwell)
+    dx = 0.022 if x < (LIM - 0.03) else -0.022
+    arr = np.asarray(rgb, dtype=float)
+    lum = float(arr.max()) if arr.size else 1.0
+    if lum > 0.05:
+        # Guarantee a bright white-hot core so the beam node stands out distinctly from any parent sheet
+        core = np.clip(arr * 0.25 + (WHITE * max(lum, 0.92)) * 0.75, 0.0, 1.0)
+    else:
+        core = arr
+    return Path(np.array([[x, y], [x + dx, y]], dtype=float), core, max(int(dwell), 4))
 
 
 def beam_plane_beads(
@@ -157,7 +169,7 @@ def beam_plane_beads(
     b,
     rgb,
     count: int = 4,
-    dwell: int = 3,
+    dwell: int = 5,
     phase: float = 0.0,
     include_ends: bool = True,
 ) -> list[Path]:
@@ -276,9 +288,10 @@ def _optimize_path_order(paths: list[Path], tol: float = 0.025) -> list[Path]:
     deduped: list[Path] = []
     sigs: list[tuple[np.ndarray, np.ndarray]] = []
     for p in paths:
-        if len(p.pts) == 2:
+        # Never deduplicate high-dwell hot points
+        if p.dwell < 3 and len(p.pts) == 2:
             a, b = p.pts[0], p.pts[1]
-            if float(np.hypot(b[0] - a[0], b[1] - a[1])) >= 0.02:
+            if float(np.hypot(b[0] - a[0], b[1] - a[1])) >= 0.03:
                 dup = False
                 for ka, kb in sigs:
                     d_same = max(float(np.hypot(a[0] - ka[0], a[1] - ka[1])), float(np.hypot(b[0] - kb[0], b[1] - kb[1])))
@@ -344,6 +357,29 @@ def snare_swell(c: Ctx) -> float:
 
 def strobe_gate(c: Ctx, div: float = 4.0, duty: float = 0.48) -> bool:
     return (not c.strobe) or ((c.bt * div) % 1.0) < duty
+
+
+def _ease(t: float) -> float:
+    t = min(max(t, 0.0), 1.0)
+    return t * t * (3.0 - 2.0 * t)
+
+
+def _lane_x(i: int, lanes: int) -> float:
+    return -0.84 + 1.68 * i / max(lanes - 1, 1)
+
+
+def _clip(v):
+    return np.clip(v, -LIM, LIM)
+
+
+def mirror_x(paths: list[Path]) -> list[Path]:
+    """What the hardware-inverted projector shows (left<->right)."""
+    return [Path(p.pts * np.array([-1.0, 1.0]), p.rgb, p.dwell) for p in paths]
+
+
+def with_mirror(paths: list[Path]) -> list[Path]:
+    """Image plus its mirror, for a SINGLE projector that should look like the pair."""
+    return list(paths) + mirror_x(paths)
 
 
 @dataclass
@@ -489,7 +525,7 @@ def _drop_impact_effect(c: Ctx, progress: float, variant: int) -> list[Path]:
 # ======================================================================== IMPROVED LASER SKY SCENES (BREAKDOWN)
 
 def sc_beaded_sky_canopy(c: Ctx) -> list[Path]:
-    """Dual breathing Laser Sky sheets studded with high-dwell hot-beam anchors."""
+    """Dual breathing Laser Sky sheets studded with high-dwell white-hot beam anchors."""
     y_base = 0.24 + 0.14 * smooth_wave(c.bt, 28.0)
     tilt = 0.20 * smooth_wave(c.bt, 16.0)
     beads = c.count(4, 6)
@@ -498,12 +534,12 @@ def sc_beaded_sky_canopy(c: Ctx) -> list[Path]:
         s = 1.0 if idx == 0 else -1.0
         a = (-LIM, float(np.clip(y_base + gap - s * tilt, -LIM, LIM)))
         b = (LIM, float(np.clip(y_base + gap + s * tilt, -LIM, LIM)))
-        out.append(line(a, b, c.palette(idx, v=0.82), dwell=0))
+        out.append(line(a, b, c.palette(idx, v=0.72), dwell=0))
         out.extend(beam_plane_beads(
             a, b,
-            c.palette(idx + 1, v=1.0, white_boost=0.35),
+            WHITE,
             count=beads,
-            dwell=3,
+            dwell=5,
             phase=c.bt * 0.15 * s,
             include_ends=False,
         ))
@@ -630,13 +666,13 @@ def sc_dual_horizon_mirage(c: Ctx) -> list[Path]:
 def sc_floating_dot_constellation(c: Ctx) -> list[Path]:
     y_sky = 0.12 + 0.12 * smooth_wave(c.bt, 24.0)
     tilt = 0.14 * smooth_wave(c.bt, 16.0)
-    out: list[Path] = [line((-LIM, y_sky - tilt), (LIM, y_sky + tilt), c.palette(0, v=0.84), dwell=0)]
+    out: list[Path] = [line((-LIM, y_sky - tilt), (LIM, y_sky + tilt), c.palette(0, v=0.78), dwell=0)]
     n_stars = c.count(6, 8)
     for s in range(n_stars):
         u = (s + 0.5) / n_stars
         x = -0.84 + 1.68 * u + 0.05 * math.sin(c.bt * TAU / 16.0 + s)
         y = 0.46 + 0.24 * math.sin(c.bt * TAU / 20.0 + s * 1.7)
-        out.append(hot_dot((x, y), c.palette(s + 1, v=0.92), dwell=2))
+        out.append(hot_dot((x, y), WHITE, dwell=5))
     return out
 
 
@@ -698,7 +734,7 @@ def _apply_breakdown_beat_burst(
     c_idx = int(burst_params.get("c_idx", 1))
     seeds = burst_params.get("seeds", ())
 
-    col_hot = c.palette(c_idx, v=1.0, white_boost=0.55 * env) * min(1.0, 0.35 + 0.85 * env)
+    col_hot = WHITE * min(1.0, 0.45 + 0.75 * env)
     col_acc = c.palette(c_idx + 1, v=1.0, white_boost=0.30 * env) * min(1.0, 0.30 + 0.80 * env)
     extra: list[Path] = []
 
@@ -710,7 +746,7 @@ def _apply_breakdown_beat_burst(
             r = grow * (0.65 + 0.55 * seeds[(i + 2) % len(seeds)])
             px = cx + r * math.cos(a)
             py = cy + r * 0.85 * math.sin(a)
-            extra.append(hot_dot((px, py), col_hot if i % 2 == 0 else col_acc, dwell=2))
+            extra.append(hot_dot((px, py), col_hot, dwell=5))
 
     elif style == "diagonal_slash":
         seg = clipped_plane(cx, cy, ang, span=LIM)
@@ -725,7 +761,7 @@ def _apply_breakdown_beat_burst(
         for i in range(n_dots):
             sx = (seeds[(i * 2) % len(seeds)] * 2.0 - 1.0) * 0.86
             sy = (seeds[(i * 2 + 1) % len(seeds)] * 2.0 - 1.0) * 0.82
-            extra.append(hot_dot((sx, sy), col_hot if i % 2 == 0 else col_acc, dwell=2))
+            extra.append(hot_dot((sx, sy), col_hot, dwell=5))
 
     elif style == "shock_ring":
         rad = min((0.12 + 0.76 * (beat_phase / 0.72)) * scale, LIM)
@@ -876,11 +912,200 @@ def sc_pingpong_blackout_whip(c: Ctx) -> list[Path]:
         ]
 
 
+# ======================================================================== MIRRORED-PAIR BEAM CHASES & SWEEPING BARS
+
+def sc_beat_bar_sweep(c: Ctx) -> list[Path]:
+    """On-beat sweeping bars: one eased pass of the field per beat, ping-pong, with fading echo bars behind."""
+    pump = beat_pump(c)
+    bars = c.count(1, 2)
+    lean = 0.14 * smooth_wave(c.bt, 8.0)
+    gap = 0.30
+    out: list[Path] = []
+    for k in range(3 if c.detail >= 0.4 else 2):
+        u = beat_sweep(c.bt - 0.07 * k, 1.0, True)
+        xc = -0.80 + 1.60 * u
+        v = (1.0, 0.45, 0.22)[k]
+        for i in range(bars):
+            x = xc + (i - (bars - 1) / 2.0) * gap
+            col = c.palette(i, v=v, white_boost=0.55 * pump if k == 0 else 0.0)
+            out.append(line((float(_clip(x - lean)), -LIM), (float(_clip(x + lean)), LIM), col))
+    return out
+
+
+def _lane_chase(c: Ctx, step_f: float, duty: float | None = None, lanes: int = 8, tail: int = 2,
+                boost: float = 0.0) -> list[Path]:
+    """A lit bar hopping lane to lane (bouncing at the edges), leaving a short fading tail."""
+    step = int(math.floor(step_f))
+    sub = step_f - step
+    if duty is not None and c.strobe and sub > duty:
+        return []
+    pump = beat_pump(c)
+    span = 2 * lanes - 2
+    k = step % span
+    head = k if k < lanes else span - k
+    dirn = 1 if k < lanes - 1 else -1
+    pal = (step // lanes) % 4
+    out: list[Path] = []
+    for j in range(tail + 1):
+        i = head - dirn * j
+        if not 0 <= i < lanes:
+            continue
+        v = 1.0 if j == 0 else (0.5, 0.25, 0.12)[min(j - 1, 2)]
+        col = c.palette(pal, v=v, white_boost=boost * pump if j == 0 else 0.0)
+        x = _lane_x(i, lanes)
+        a, b = (x, -LIM), (x, LIM)
+        out.append(line(*((a, b) if j % 2 == 0 else (b, a)), col))
+    return out
+
+
+def sc_bar_chase_lanes(c: Ctx) -> list[Path]:
+    """Running-light chase across 8 vertical lanes at 8th notes."""
+    return _lane_chase(c, c.bt * 2.0, tail=c.count(1, 3), boost=0.4)
+
+
+def sc_drop_lane_chase(c: Ctx) -> list[Path]:
+    """Running-light chase at 16th notes with hard blackout gaps and white-hot heads."""
+    return _lane_chase(c, c.bt * 4.0, duty=0.58, tail=1, boost=0.75)
+
+
+def sc_beam_chase_diagonals(c: Ctx) -> list[Path]:
+    """Two diagonal beams chasing across 7 positions at 8th notes with dwell-point hot beads."""
+    pump = beat_pump(c)
+    n = 7
+    head = int(math.floor(c.bt * 2.0)) % n
+    phi = (-0.85 if (int(c.bt // 8) % 2) else 0.85)
+    out: list[Path] = []
+    for i, v, pal in ((head, 1.0, 0), ((head - 1) % n, 0.45, 0), ((head + 3) % n, 1.0, 1), ((head + 2) % n, 0.45, 1)):
+        x0 = -0.90 + 1.80 * i / (n - 1)
+        seg = clipped_plane(x0, 0.0, phi + math.pi / 2.0)
+        if seg is not None:
+            out.append(line(seg[0], seg[1], c.palette(pal, v=v * 0.82 if v == 1.0 else v)))
+            if v == 1.0 and c.detail >= 0.35:
+                out.extend(beam_plane_beads(
+                    seg[0], seg[1],
+                    WHITE,
+                    count=c.count(3, 5),
+                    dwell=5,
+                    phase=c.bt * 0.3,
+                    include_ends=False,
+                ))
+    return out
+
+
+_SCISSOR = (0.35, 0.95, 0.60, 1.30)
+
+
+def sc_scissor_snap(c: Ctx) -> list[Path]:
+    """Two long beams crossing at a drifting pivot with traveling white-hot dwell beads."""
+    pump = beat_pump(c)
+    sf = c.bt * 2.0
+    step = int(math.floor(sf))
+    a = _SCISSOR[(step - 1) % 4] + (_SCISSOR[step % 4] - _SCISSOR[(step - 1) % 4]) * _ease((sf - step) / 0.3)
+    px = 0.30 * smooth_wave(c.bt, 8.0)
+    out: list[Path] = []
+    for i, sign in enumerate((1.0, -1.0)):
+        seg = clipped_plane(px, 0.0, -sign * a)
+        if seg is not None:
+            out.append(line(seg[0], seg[1], c.palette(i, v=0.82)))
+            if c.detail >= 0.35:
+                out.extend(beam_plane_beads(
+                    seg[0], seg[1],
+                    WHITE,
+                    count=c.count(3, 5),
+                    dwell=5,
+                    phase=c.bt * 0.25 * sign,
+                    include_ends=False,
+                ))
+    if c.detail >= 0.6:
+        out.append(line((-LIM, 0.0), (LIM, 0.0), c.palette(2, v=0.45)))
+    return out
+
+
+_S = 0.84
+_CORNERS = [(-_S, -_S), (_S, -_S), (_S, _S), (-_S, _S)]
+
+
+def _perim(s: float, scale: float = 1.0):
+    s %= 4.0
+    i = int(s) % 4
+    t = min(max(s - i, 0.0), 1.0) if int(s) < 4 else 0.0
+    a, b = _CORNERS[i], _CORNERS[(i + 1) % 4]
+    return ((a[0] + (b[0] - a[0]) * t) * scale, (a[1] + (b[1] - a[1]) * t) * scale)
+
+
+def _comet(head: float, length: float, scale: float, col: np.ndarray, flip: bool) -> Path:
+    s0 = head - length
+    ss = set(np.linspace(s0, head, 12).tolist())
+    k = math.floor(s0) + 1
+    while k < head:
+        ss.add(float(k))
+        k += 1
+    pts = np.array([_perim(s, scale) for s in sorted(ss)])
+    if flip:
+        pts[:, 0] *= -1.0
+    fade = np.linspace(0.10, 1.0, len(pts))[:, None]
+    return Path(pts, np.clip(col[None, :] * fade, 0.0, 1.0), dwell=2)
+
+
+def sc_perimeter_comet(c: Ctx) -> list[Path]:
+    """Comets racing around the frame (one lap per 2 beats), plus a counter-rotating inner pair."""
+    pump = beat_pump(c)
+    h = ((c.bt / 2.0) % 1.0) * 4.0
+    out = [_comet(h, 1.1, 1.0, c.palette(0, white_boost=0.5 * pump), False),
+           _comet(h + 2.0, 1.1, 1.0, c.palette(1, white_boost=0.5 * pump), False)]
+    if c.detail >= 0.5:
+        out.append(_comet(h + 1.0, 0.9, 0.5, c.palette(2, v=0.9), True))
+        out.append(_comet(h + 3.0, 0.9, 0.5, c.palette(3, v=0.9), True))
+    return out
+
+
+def _chevrons(c: Ctx, speed: float) -> list[Path]:
+    pump = beat_pump(c)
+    n = c.count(3, 5)
+    spacing = 1.8 / n
+    ph = (c.bt * speed) % 1.0
+    out: list[Path] = []
+    for k in range(n + 1):
+        x = -0.9 + (k + ph) * spacing
+        if x > LIM:
+            continue
+        v = (0.35 + 0.65 * (x + 0.9) / 1.8) * min(1.0, (x + 0.9) / 0.3)
+        h, d = 0.55, 0.18
+        pts = np.array([[x - d, h], [x, 0.0], [x - d, -h]])
+        pts[:, 0] = _clip(pts[:, 0])
+        out.append(Path(pts, c.palette(k, v=max(v, 0.0), white_boost=0.5 * pump if k == n else 0.0), dwell=2))
+    return out
+
+
+def sc_chevron_run(c: Ctx) -> list[Path]:
+    """Chevrons >>> marching across on the beat."""
+    return _chevrons(c, 0.5)
+
+
+def sc_drop_chevron_run(c: Ctx) -> list[Path]:
+    """Double-speed chevrons, gated into 8th-note flashes."""
+    return _chevrons(c, 1.0) if strobe_gate(c, div=2.0, duty=0.62) else []
+
+
+def sc_eq_bars(c: Ctx) -> list[Path]:
+    """Seven vertical bars reacting to bass, mid, and high frequency energy."""
+    pump = beat_pump(c)
+    bass, mid, high = c.f.bass, c.f.mid, c.f.high
+    out: list[Path] = []
+    for i in range(7):
+        d = abs(i - 3) / 3.0
+        band = (1.0 - d) * bass + d * (0.6 * mid + 0.4 * high)
+        band = min(max(band, 0.0), 1.0)
+        h = 0.14 + 0.74 * min(1.0, band * (0.8 + 0.4 * pump))
+        x = -0.78 + 1.56 * i / 6.0
+        out.append(line((x, -h), (x, h), c.palette(i, v=0.7 + 0.3 * band, white_boost=0.5 * pump if i == 3 else 0.0)))
+    return out
+
+
 # ======================================================================== MAIN, DROP & BUILD SCENES (NO FANS)
 
 def sc_beaded_horizon_planes(c: Ctx) -> list[Path]:
-    """Sweeping horizontal planes studded with 4–6 high-dwell hot-beam anchors."""
-    pump = beat_pump(c)
+    """Sweeping horizontal planes studded with 4–6 white-hot high-dwell beam anchors."""
     u = beat_sweep(c.bt, beats_per_pass=2.0, alternate=True)
     y_center = -0.64 + 1.28 * u
     slant = 0.18 * smooth_wave(c.bt, 6.0)
@@ -890,12 +1115,12 @@ def sc_beaded_horizon_planes(c: Ctx) -> list[Path]:
         y0 = float(np.clip(y_center + off - slant, -LIM, LIM))
         y1 = float(np.clip(y_center + off + slant, -LIM, LIM))
         a, b = (-LIM, y0), (LIM, y1)
-        out.append(line(a, b, c.palette(idx, v=0.88), dwell=0))
+        out.append(line(a, b, c.palette(idx, v=0.76), dwell=0))
         out.extend(beam_plane_beads(
             a, b,
-            c.palette(idx + 2, v=1.0, white_boost=0.55 * pump),
+            WHITE,
             count=beads,
-            dwell=3,
+            dwell=5,
             phase=c.bt * (0.35 if idx == 0 else -0.35),
             include_ends=False,
         ))
@@ -965,8 +1190,8 @@ def sc_prism_matrix_grid(c: Ctx) -> list[Path]:
             h_u = (col_i / max(cols - 1, 1)) - 0.5
             x = h_u * spread_x + v_u * tilt
             y = v_u * spread_y - h_u * tilt
-            col = c.palette(r * cols + col_i, white_boost=0.45 * pump if (r + col_i) % 2 == 0 else 0.0)
-            out.append(hot_dot((x, y), col, dwell=2))
+            col = WHITE if (r + col_i) % 2 == 0 else c.palette(r * cols + col_i, white_boost=0.65)
+            out.append(hot_dot((x, y), col, dwell=5))
     return out
 
 
@@ -1341,7 +1566,6 @@ def sc_horizontal_plane_blast(c: Ctx) -> list[Path]:
 
 
 def sc_hot_beam_matrix(c: Ctx) -> list[Path]:
-    pump = beat_pump(c)
     cols = c.count(4, 5)
     rows = 2
     sway_x = 0.18 * smooth_wave(c.bt, 4.0)
@@ -1352,7 +1576,7 @@ def sc_hot_beam_matrix(c: Ctx) -> list[Path]:
         for col_i in range(cols):
             u = (col_i / max(cols - 1, 1)) - 0.5
             x = u * 1.48 + sway_x
-            out.append(hot_dot((x, y), c.palette(r * 2 + col_i, white_boost=0.45 * pump if col_i % 2 == 0 else 0.0), dwell=2))
+            out.append(hot_dot((x, y), WHITE if col_i % 2 == 0 else c.palette(r * 2 + col_i, white_boost=0.75), dwell=5))
     return out
 
 
@@ -1386,6 +1610,12 @@ def sc_strobe_tunnel_ribs(c: Ctx) -> list[Path]:
 
 
 # ======================================================================== BUILD SECTION SCENES (NO FANS)
+
+def sc_build_lane_accel(c: Ctx) -> list[Path]:
+    """Lane chase that accelerates through the build (driven by rise-time), tail growing and heads whitening."""
+    b = min(max(c.f.build, 0.0), 1.0)
+    return _lane_chase(c, c.rt * 2.0, tail=1 + int(2 * b), boost=0.85 * b * b)
+
 
 def sc_build_blackout_chase(c: Ctx) -> list[Path]:
     """Escalating wide-coverage blackout chase accelerating from 8ths to 16ths during Builds."""
@@ -1485,7 +1715,7 @@ def sc_build_dot_convergence(c: Ctx) -> list[Path]:
         ang = c.rt * 2.2 + (i / n_dots) * TAU
         px = ox + r * math.cos(ang)
         py = r * math.sin(ang)
-        out.append(hot_dot((px, py), c.palette(i, white_boost=0.5 * (b ** 2)), dwell=1))
+        out.append(hot_dot((px, py), WHITE, dwell=5))
     return out
 
 
@@ -1506,23 +1736,21 @@ def _apply_modifier(paths: list[Path], mod: str, c: Ctx) -> list[Path]:
         return paths
 
     if mod == "plane_dwell_beads":
-        pump = beat_pump(c)
         n_beads = c.count(3, 5)
         out = list(paths)
-        bead_budget = 14
+        bead_budget = 16
         for idx, p in enumerate(paths):
             if bead_budget <= 0:
                 break
-            if len(p.pts) == 2:
+            if p.dwell < 3 and len(p.pts) == 2:
                 seg_len = float(np.hypot(*(p.pts[1] - p.pts[0])))
                 if seg_len >= 0.35:
-                    col = c.palette(idx + 1, v=1.0, white_boost=0.45 * pump)
                     beads = beam_plane_beads(
                         p.pts[0],
                         p.pts[1],
-                        col,
+                        WHITE,
                         count=n_beads,
-                        dwell=3,
+                        dwell=5,
                         phase=c.bt * 0.25 * (1.0 if idx % 2 == 0 else -1.0),
                         include_ends=False,
                     )
@@ -1593,7 +1821,7 @@ def _apply_modifier(paths: list[Path], mod: str, c: Ctx) -> list[Path]:
             return paths
         out = []
         for idx, p in enumerate(paths):
-            if len(p.pts) == 2 and float(np.hypot(*(p.pts[1] - p.pts[0]))) > 0.05:
+            if p.dwell < 3 and len(p.pts) == 2 and float(np.hypot(*(p.pts[1] - p.pts[0]))) > 0.05:
                 out.extend(dashed_beam(p.pts[0], p.pts[1], p.rgb, segments=3, duty=0.65, phase=c.bt * 2.0 + idx * 0.25))
             else:
                 out.append(p)
@@ -1658,6 +1886,16 @@ def _morph_paths(prev_paths: list[Path], next_paths: list[Path], alpha: float) -
 
 
 SCENES = {
+    # Mirrored-Pair Beam Chases & Sweeping Bars
+    "beat_bar_sweep": sc_beat_bar_sweep,
+    "bar_chase_lanes": sc_bar_chase_lanes,
+    "drop_lane_chase": sc_drop_lane_chase,
+    "beam_chase_diagonals": sc_beam_chase_diagonals,
+    "scissor_snap": sc_scissor_snap,
+    "perimeter_comet": sc_perimeter_comet,
+    "chevron_run": sc_chevron_run,
+    "drop_chevron_run": sc_drop_chevron_run,
+    "eq_bars": sc_eq_bars,
     # Beaded Dwell-Point Plane Scenes
     "beaded_horizon_planes": sc_beaded_horizon_planes,
     "beaded_sky_canopy": sc_beaded_sky_canopy,
@@ -1712,6 +1950,7 @@ SCENES = {
     "quad_corner_lasers": sc_quad_corner_lasers,
     "strobe_tunnel_ribs": sc_strobe_tunnel_ribs,
     # Build Scenes
+    "build_lane_accel": sc_build_lane_accel,
     "build_blackout_chase": sc_build_blackout_chase,
     "build_helix_tighten": sc_build_helix_tighten,
     "build_tunnel_collapse": sc_build_tunnel_collapse,
@@ -1745,16 +1984,23 @@ SCENES = {
 QUICK_CUES: list[tuple[str, str]] = [
     ("beaded_sky_canopy", "Beaded Sky"),
     ("beaded_horizon_planes", "Beaded Planes"),
-    ("concentric_tunnel", "Tunnel"),
+    ("scissor_snap", "Scissor Snap"),
     ("blackout_zone_chase", "Blackout Chase"),
-    ("infinity_lissajous", "Lissajous"),
-    ("quadrant_blackout_relay", "Quad Blackout"),
-    ("laser_crown_vortex", "Laser Crown"),
-    ("shutter_grid_chase", "Shutter Chase"),
+    ("beam_chase_diagonals", "Diag Chase"),
+    ("perimeter_comet", "Comet Frame"),
+    ("chevron_run", "Chevrons"),
+    ("eq_bars", "EQ Bars"),
 ]
 
 POOLS = {
     MAIN: [
+        "beat_bar_sweep",
+        "bar_chase_lanes",
+        "beam_chase_diagonals",
+        "scissor_snap",
+        "perimeter_comet",
+        "chevron_run",
+        "eq_bars",
         "beaded_horizon_planes",
         "blackout_zone_chase",
         "quadrant_blackout_relay",
@@ -1784,6 +2030,11 @@ POOLS = {
         "alternating_horizon_gates",
     ],
     DROP: [
+        "drop_lane_chase",
+        "drop_chevron_run",
+        "scissor_snap",
+        "beam_chase_diagonals",
+        "beat_bar_sweep",
         "beaded_horizon_planes",
         "blackout_zone_chase",
         "quadrant_blackout_relay",
@@ -1825,6 +2076,7 @@ POOLS = {
         "slow_v_canopy_sky",
     ],
     BUILD: [
+        "build_lane_accel",
         "build_blackout_chase",
         "build_helix_tighten",
         "build_tunnel_collapse",
@@ -1862,8 +2114,8 @@ DROP_IMPACT_BEATS = 1.5
 
 
 class FXEngine:
-    """High-FPS FX engine with upgraded Laser Sky, beaded dwell-point planes, randomized per-beat
-    Breakdown bursts, rapid wide-coverage blackout chasers, Color-Theory Harmony Palettes & Art-Net RGB override."""
+    """High-FPS FX engine with upgraded Laser Sky, beaded dwell-point planes, mirrored-pair beam chases,
+    randomized per-beat Breakdown bursts, rapid wide-coverage blackout chasers, Color-Theory Harmony Palettes & Art-Net RGB override."""
 
     def __init__(self, seed: int = 1, force_scene: str | None = None):
         self.rng = np.random.default_rng(seed)
@@ -2191,256 +2443,3 @@ class FXEngine:
         if artnet is not None and artnet.connected:
             label = f"{label} · ART-NET"
         return _optimize_path_order(paths), label
-
-# ======================================================================== EXTRA SCENES (mirrored-pair beam chases / sweeping bars)
-# Designed for two projectors on one DAC output, one inverted in its hardware menu: image + mirror_x(image) is the
-# intended picture (sweeps meet mid-field, diagonals cross, chevrons converge, rotations counter-rotate).
-
-# ------------------------------------------------------------------------------ helpers
-def _ease(t: float) -> float:
-    t = min(max(t, 0.0), 1.0)
-    return t * t * (3.0 - 2.0 * t)
-
-
-def _lane_x(i: int, lanes: int) -> float:
-    return -0.84 + 1.68 * i / max(lanes - 1, 1)
-
-
-def _clip(v):
-    return np.clip(v, -LIM, LIM)
-
-
-def mirror_x(paths: list[Path]) -> list[Path]:
-    """What the hardware-inverted projector shows (left<->right)."""
-    return [Path(p.pts * np.array([-1.0, 1.0]), p.rgb, p.dwell) for p in paths]
-
-
-def with_mirror(paths: list[Path]) -> list[Path]:
-    """Image plus its mirror, for a SINGLE projector that should look like the pair."""
-    return list(paths) + mirror_x(paths)
-
-
-# ------------------------------------------------------------------------------ MAIN / DROP
-def sc_beat_bar_sweep(c: Ctx) -> list[Path]:
-    """On-beat sweeping bars: one eased pass of the field per beat, ping-pong, with fading echo bars behind.
-    The mirrored projector sweeps the other way, so the bar pairs pass through each other mid-beat."""
-    pump = beat_pump(c)
-    bars = c.count(1, 2)
-    lean = 0.14 * smooth_wave(c.bt, 8.0)
-    gap = 0.30
-    out: list[Path] = []
-    for k in range(3 if c.detail >= 0.4 else 2):                  # k = 0 head, then echoes
-        u = beat_sweep(c.bt - 0.07 * k, 1.0, True)
-        xc = -0.80 + 1.60 * u
-        v = (1.0, 0.45, 0.22)[k]
-        for i in range(bars):
-            x = xc + (i - (bars - 1) / 2.0) * gap
-            col = c.palette(i, v=v, white_boost=0.55 * pump if k == 0 else 0.0)
-            out.append(line((float(_clip(x - lean)), -LIM), (float(_clip(x + lean)), LIM), col))
-    return out
-
-
-def _lane_chase(c: Ctx, step_f: float, duty: float | None = None, lanes: int = 8, tail: int = 2,
-                boost: float = 0.0) -> list[Path]:
-    """A lit bar hopping lane to lane (bouncing at the edges), leaving a short fading tail."""
-    step = int(math.floor(step_f))
-    sub = step_f - step
-    if duty is not None and c.strobe and sub > duty:               # hard off-time between hops
-        return []
-    pump = beat_pump(c)
-    span = 2 * lanes - 2
-    k = step % span
-    head = k if k < lanes else span - k
-    dirn = 1 if k < lanes - 1 else -1
-    pal = (step // lanes) % 4
-    out: list[Path] = []
-    for j in range(tail + 1):
-        i = head - dirn * j
-        if not 0 <= i < lanes:
-            continue
-        v = 1.0 if j == 0 else (0.5, 0.25, 0.12)[min(j - 1, 2)]
-        col = c.palette(pal, v=v, white_boost=boost * pump if j == 0 else 0.0)
-        x = _lane_x(i, lanes)
-        a, b = (x, -LIM), (x, LIM)
-        out.append(line(*((a, b) if j % 2 == 0 else (b, a)), col))
-    return out
-
-
-def sc_bar_chase_lanes(c: Ctx) -> list[Path]:
-    """Running-light chase across 8 vertical lanes at 8th notes. Mirrored projector runs the opposite way,
-    so the two heads collide in the centre."""
-    return _lane_chase(c, c.bt * 2.0, tail=c.count(1, 3), boost=0.4)
-
-
-def sc_drop_lane_chase(c: Ctx) -> list[Path]:
-    """The same chase at 16th notes with hard blackout gaps and white-hot heads."""
-    return _lane_chase(c, c.bt * 4.0, duty=0.58, tail=1, boost=0.75)
-
-
-def sc_beam_chase_diagonals(c: Ctx) -> list[Path]:
-    """Two diagonal beams (opposite sides of the field) chasing across 7 positions at 8th notes, each with a dim
-    follower. Slant flips every 8 beats; on the mirrored projector the slant is reversed, so beams cross."""
-    pump = beat_pump(c)
-    n = 7
-    head = int(math.floor(c.bt * 2.0)) % n
-    phi = (-0.85 if (int(c.bt // 8) % 2) else 0.85)
-    out: list[Path] = []
-    for i, v, pal in ((head, 1.0, 0), ((head - 1) % n, 0.45, 0), ((head + 3) % n, 1.0, 1), ((head + 2) % n, 0.45, 1)):
-        x0 = -0.90 + 1.80 * i / (n - 1)
-        seg = clipped_plane(x0, 0.0, phi + math.pi / 2.0)
-        if seg is not None:
-            out.append(line(seg[0], seg[1], c.palette(pal, v=v, white_boost=0.5 * pump if v == 1.0 else 0.0)))
-            if v == 1.0 and c.detail >= 0.35:                      # dwell-point beads on the lead beams
-                out.extend(beam_plane_beads(seg[0], seg[1], c.palette(pal + 1, v=1.0, white_boost=0.5 + 0.4 * pump),
-                                            count=c.count(3, 5), dwell=3, phase=c.bt * 0.3, include_ends=False))
-    return out
-
-
-_SCISSOR = (0.35, 0.95, 0.60, 1.30)           # half-opening angle (rad from vertical) per half-beat step
-
-
-def sc_scissor_snap(c: Ctx) -> list[Path]:
-    """Two long beams crossing at a drifting pivot; the opening angle snaps every half beat (eased in 30%).
-    The mirrored pivot drifts the opposite way, so two scissors cross each other."""
-    pump = beat_pump(c)
-    sf = c.bt * 2.0
-    step = int(math.floor(sf))
-    a = _SCISSOR[(step - 1) % 4] + (_SCISSOR[step % 4] - _SCISSOR[(step - 1) % 4]) * _ease((sf - step) / 0.3)
-    px = 0.30 * smooth_wave(c.bt, 8.0)
-    out: list[Path] = []
-    for i, sign in enumerate((1.0, -1.0)):
-        seg = clipped_plane(px, 0.0, -sign * a)
-        if seg is not None:
-            out.append(line(seg[0], seg[1], c.palette(i, v=1.0, white_boost=0.5 * pump)))
-            if c.detail >= 0.35:                                   # beads travel opposite ways on the two beams
-                out.extend(beam_plane_beads(seg[0], seg[1], c.palette(i + 2, v=1.0, white_boost=0.6 + 0.3 * pump),
-                                            count=c.count(3, 5), dwell=3, phase=c.bt * 0.25 * sign,
-                                            include_ends=False))
-    if c.detail >= 0.6:
-        out.append(line((-LIM, 0.0), (LIM, 0.0), c.palette(2, v=0.45)))
-    return out
-
-
-_S = 0.84
-_CORNERS = [(-_S, -_S), (_S, -_S), (_S, _S), (-_S, _S)]
-
-
-def _perim(s: float, scale: float = 1.0):
-    s %= 4.0
-    i = int(s) % 4                     # s can round to exactly 4.0
-    t = min(max(s - i, 0.0), 1.0) if int(s) < 4 else 0.0
-    a, b = _CORNERS[i], _CORNERS[(i + 1) % 4]
-    return ((a[0] + (b[0] - a[0]) * t) * scale, (a[1] + (b[1] - a[1]) * t) * scale)
-
-
-def _comet(head: float, length: float, scale: float, col: np.ndarray, flip: bool) -> Path:
-    s0 = head - length
-    ss = set(np.linspace(s0, head, 12).tolist())
-    k = math.floor(s0) + 1
-    while k < head:                                   # keep exact corners so the turns stay sharp
-        ss.add(float(k))
-        k += 1
-    pts = np.array([_perim(s, scale) for s in sorted(ss)])
-    if flip:
-        pts[:, 0] *= -1.0
-    fade = np.linspace(0.10, 1.0, len(pts))[:, None]
-    return Path(pts, np.clip(col[None, :] * fade, 0.0, 1.0), dwell=2)
-
-
-def sc_perimeter_comet(c: Ctx) -> list[Path]:
-    """Comets racing around the frame (one lap per 2 beats), plus a counter-rotating inner pair.
-    On the mirrored projector every lap runs the other way."""
-    pump = beat_pump(c)
-    h = ((c.bt / 2.0) % 1.0) * 4.0
-    out = [_comet(h, 1.1, 1.0, c.palette(0, white_boost=0.5 * pump), False),
-           _comet(h + 2.0, 1.1, 1.0, c.palette(1, white_boost=0.5 * pump), False)]
-    if c.detail >= 0.5:
-        out.append(_comet(h + 1.0, 0.9, 0.5, c.palette(2, v=0.9), True))
-        out.append(_comet(h + 3.0, 0.9, 0.5, c.palette(3, v=0.9), True))
-    return out
-
-
-def _chevrons(c: Ctx, speed: float) -> list[Path]:
-    pump = beat_pump(c)
-    n = c.count(3, 5)
-    spacing = 1.8 / n
-    ph = (c.bt * speed) % 1.0
-    out: list[Path] = []
-    for k in range(n + 1):
-        x = -0.9 + (k + ph) * spacing
-        if x > LIM:
-            continue
-        v = (0.35 + 0.65 * (x + 0.9) / 1.8) * min(1.0, (x + 0.9) / 0.3)       # fade in at the left edge
-        h, d = 0.55, 0.18
-        pts = np.array([[x - d, h], [x, 0.0], [x - d, -h]])
-        pts[:, 0] = _clip(pts[:, 0])
-        out.append(Path(pts, c.palette(k, v=max(v, 0.0), white_boost=0.5 * pump if k == n else 0.0), dwell=2))
-    return out
-
-
-def sc_chevron_run(c: Ctx) -> list[Path]:
-    """Chevrons >>> marching across on the beat. The mirrored projector shows <<<, so the arrows converge."""
-    return _chevrons(c, 0.5)
-
-
-def sc_drop_chevron_run(c: Ctx) -> list[Path]:
-    """Double-speed chevrons, gated into 8th-note flashes."""
-    return _chevrons(c, 1.0) if strobe_gate(c, div=2.0, duty=0.62) else []
-
-
-def sc_eq_bars(c: Ctx) -> list[Path]:
-    """Seven vertical bars that react to the music: bass in the middle, mids beside it, highs at the edges.
-    Symmetric about both axes, so it reads the same on both projectors."""
-    pump = beat_pump(c)
-    bass, mid, high = c.f.bass, c.f.mid, c.f.high
-    out: list[Path] = []
-    for i in range(7):
-        d = abs(i - 3) / 3.0
-        band = (1.0 - d) * bass + d * (0.6 * mid + 0.4 * high)
-        band = min(max(band, 0.0), 1.0)
-        h = 0.14 + 0.74 * min(1.0, band * (0.8 + 0.4 * pump))
-        x = -0.78 + 1.56 * i / 6.0
-        out.append(line((x, -h), (x, h), c.palette(i, v=0.7 + 0.3 * band, white_boost=0.5 * pump if i == 3 else 0.0)))
-    return out
-
-
-# ------------------------------------------------------------------------------ BUILD
-def sc_build_lane_accel(c: Ctx) -> list[Path]:
-    """Lane chase that accelerates through the build (driven by rise-time), tail growing and heads whitening."""
-    b = min(max(c.f.build, 0.0), 1.0)
-    return _lane_chase(c, c.rt * 2.0, tail=1 + int(2 * b), boost=0.85 * b * b)
-
-
-NEW_SCENES = {
-    "beat_bar_sweep": sc_beat_bar_sweep,
-    "bar_chase_lanes": sc_bar_chase_lanes,
-    "drop_lane_chase": sc_drop_lane_chase,
-    "beam_chase_diagonals": sc_beam_chase_diagonals,
-    "scissor_snap": sc_scissor_snap,
-    "perimeter_comet": sc_perimeter_comet,
-    "chevron_run": sc_chevron_run,
-    "drop_chevron_run": sc_drop_chevron_run,
-    "eq_bars": sc_eq_bars,
-    "build_lane_accel": sc_build_lane_accel,
-}
-
-NEW_POOLS = {
-    MAIN: ["beat_bar_sweep", "bar_chase_lanes", "beam_chase_diagonals", "scissor_snap", "perimeter_comet",
-           "chevron_run", "eq_bars"],
-    DROP: ["drop_lane_chase", "drop_chevron_run", "scissor_snap", "beam_chase_diagonals", "beat_bar_sweep"],
-    BUILD: ["build_lane_accel"],
-    BREAKDOWN: [],
-}
-
-
-def install() -> None:
-    """Idempotent: add the scenes to SCENES and the section pools."""
-    SCENES.update(NEW_SCENES)
-    for section, names in NEW_POOLS.items():
-        pool = POOLS.setdefault(section, [])
-        for n in names:
-            if n not in pool:
-                pool.append(n)
-
-
-install()
