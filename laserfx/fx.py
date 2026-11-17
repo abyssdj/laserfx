@@ -1,6 +1,6 @@
-"""LaserFX Effect Engine: coherent aerial choreography, color-theory harmony palettes
-(Complementary, Split-Complementary, Rectangular/Tetradic, Triadic, Analogous),
-Art-Net RGB override support, nearest-neighbor path sorting, and RGB-safe morphing.
+"""LaserFX Effect Engine: coherent aerial choreography (Laser Sky, Tunnels, Cones, Crowns,
+Lissajous, Helix Waves, Hot-Beam Matrices), randomized per-beat Breakdown bursts,
+color-theory harmony palettes, Art-Net RGB override, and nearest-neighbor path sorting.
 """
 from __future__ import annotations
 
@@ -54,7 +54,6 @@ HARMONY_OFFSETS: dict[str, tuple[float, ...]] = {
     "analogous": (0.0, 32.0 / 360.0, -32.0 / 360.0),
 }
 
-# Curated anchor hues in degrees (laser-diode sweet spots: Red 0°, Amber 32°, Lime 105°, Cyan 188°, Cobalt 230°, Magenta 305°)
 ANCHOR_HUES_DEG = (188.0, 0.0, 275.0, 112.0, 225.0, 32.0, 312.0, 165.0)
 
 
@@ -63,7 +62,6 @@ def build_harmony_palette(
     mode: str = "complementary",
     artnet: ArtNetState | None = None,
 ) -> list[np.ndarray]:
-    """Builds a 2-to-4 color high-pop harmony wheel from either Art-Net RGB or musical anchor hue."""
     resolved_mode = mode if mode in HARMONY_OFFSETS else "complementary"
 
     if artnet is not None and artnet.connected:
@@ -74,7 +72,6 @@ def build_harmony_palette(
         if float(c1.max()) < 0.02 and artnet.rgb2 is None:
             return [np.zeros(3, dtype=float), np.zeros(3, dtype=float)]
 
-        # Explicit 6-ch Dual RGB override
         if artnet.rgb2 is not None:
             c2 = np.array(artnet.rgb2, dtype=float) * dim
             h1, s1, v1 = rgb_to_hsv(c1)
@@ -85,7 +82,6 @@ def build_harmony_palette(
             return [c1, c2, c3, c4]
 
         h1, s1, v1 = rgb_to_hsv(c1)
-        # If DMX sends pure white (low saturation), pair it with a rich harmonic accent hue
         if s1 < 0.18:
             acc_h = artnet.accent_hue if artnet.accent_hue is not None else (base_hue % 1.0)
             offsets = HARMONY_OFFSETS[resolved_mode]
@@ -104,7 +100,6 @@ def build_harmony_palette(
             palette.append(hsv(h1 + off, max(s1, 0.94), v1))
         return palette
 
-    # Internal musical anchor hue
     anchor_idx = int(round(abs(base_hue * 10.0))) % len(ANCHOR_HUES_DEG)
     h0 = (ANCHOR_HUES_DEG[anchor_idx] / 360.0) + (base_hue - round(base_hue, 1)) * 0.15
     offsets = HARMONY_OFFSETS[resolved_mode]
@@ -112,12 +107,9 @@ def build_harmony_palette(
 
 
 def _apply_split_color_harmony(paths: list[Path], palette: list[np.ndarray], artnet: ArtNetState | None) -> list[Path]:
-    """Re-colors multi-path scenes across the active harmony wheel (Complementary, Split-Comp,
-    Rectangular, Triadic, Analogous) while preserving intentional white beat flashes."""
     if not paths or not palette:
         return paths
 
-    # If Art-Net dimmer is at 0, honor external blackout cleanly
     if artnet is not None and artnet.connected and artnet.dimmer <= 0.01:
         return [Path(p.pts, np.zeros(3, dtype=float), p.dwell) for p in paths]
 
@@ -131,14 +123,12 @@ def _apply_split_color_harmony(paths: list[Path], palette: list[np.ndarray], art
                 out.append(p)
                 continue
             sat = float((arr.max() - arr.min()) / max(lum, 1e-6))
-            # Preserve crisp white punch flashes (low saturation + high brightness) unless Art-Net overrides
             if sat < 0.22 and lum > 0.65 and (artnet is None or not artnet.connected):
                 out.append(p)
                 continue
             target = palette[idx % n_cols] * lum
             out.append(Path(p.pts, np.clip(target, 0.0, 1.0), p.dwell))
         else:
-            # Per-vertex gradient: blend along harmony colors
             lum = np.max(arr, axis=1, keepdims=True)
             c_a = palette[idx % n_cols]
             c_b = palette[(idx + 1) % n_cols]
@@ -147,6 +137,8 @@ def _apply_split_color_harmony(paths: list[Path], palette: list[np.ndarray], art
             out.append(Path(p.pts, np.clip(grad, 0.0, 1.0), p.dwell))
     return out
 
+
+# ---------------------------------------------------------------- GEOMETRIC PRIMITIVES
 
 def line(a, b, rgb, dwell: int = 0) -> Path:
     return Path(np.array([a, b], dtype=float), rgb, dwell)
@@ -233,6 +225,16 @@ def polygon_path(cx: float, cy: float, rx: float, ry: float, sides: int, rot: fl
     angs = np.linspace(0.0, TAU, sides + 1) + rot
     xs = np.clip(cx + rx * np.cos(angs), -LIM, LIM)
     ys = np.clip(cy + ry * np.sin(angs), -LIM, LIM)
+    return Path(np.stack([xs, ys], axis=1), rgb, dwell=0)
+
+
+def star_polygon_path(cx: float, cy: float, r_outer: float, r_inner: float, points: int, rot: float, rgb) -> Path:
+    """Closed star/crown polygon alternating between outer and inner radii."""
+    n = points * 2 + 1
+    angs = np.linspace(0.0, TAU, n) + rot
+    radii = np.where(np.arange(n) % 2 == 0, r_outer, r_inner)
+    xs = np.clip(cx + radii * np.cos(angs), -LIM, LIM)
+    ys = np.clip(cy + radii * np.sin(angs), -LIM, LIM)
     return Path(np.stack([xs, ys], axis=1), rgb, dwell=0)
 
 
@@ -459,135 +461,386 @@ def _drop_impact_effect(c: Ctx, progress: float, variant: int) -> list[Path]:
     return out
 
 
-# ======================================================================== BREAKDOWN SCENES (ATMOSPHERIC LIQUID SKY)
+# ======================================================================== IMPROVED LASER SKY SCENES (BREAKDOWN)
 
 def sc_liquid_sky_drift(c: Ctx) -> list[Path]:
-    planes = c.count(1, 2)
-    tilt = 0.20 * smooth_wave(c.bt, 16.0)
-    y_base = 0.26 + 0.16 * smooth_wave(c.bt, 32.0)
+    """Multi-tier Liquid Sky: 2–3 layered rolling atmospheric sheets with phase-offset pitch waves."""
+    planes = c.count(2, 3)
+    y_base = 0.22 + 0.14 * smooth_wave(c.bt, 32.0)
     out: list[Path] = []
     for p in range(planes):
-        gap = (p - (planes - 1) / 2.0) * 0.34
+        gap = (p - (planes - 1) / 2.0) * 0.28
+        tilt = 0.22 * math.sin(c.bt * TAU / 16.0 + p * 1.15)
         y0 = float(np.clip(y_base + gap - tilt, -LIM, LIM))
         y1 = float(np.clip(y_base + gap + tilt, -LIM, LIM))
-        out.append(line((-LIM, y0), (LIM, y1), c.palette(p, v=0.88), dwell=0))
+        out.append(line((-LIM, y0), (LIM, y1), c.palette(p, v=0.90), dwell=0))
+    return out
+
+
+def sc_cathedral_sky_vault(c: Ctx) -> list[Path]:
+    """Overarching V-ribbed canopy sheets creating a dramatic cathedral ceiling in haze."""
+    ribs = c.count(2, 3)
+    y_apex = 0.04 + 0.14 * smooth_wave(c.bt, 24.0)
+    out: list[Path] = []
+    for r in range(ribs):
+        lift = 0.26 + r * 0.24 + 0.14 * math.sin(c.bt * TAU / 16.0 + r * 0.7)
+        y_wing = float(np.clip(y_apex + lift, -LIM, LIM))
+        y_tip = float(np.clip(y_apex + r * 0.14, -LIM, LIM))
+        pts = np.array([[-LIM, y_wing], [0.0, y_tip], [LIM, y_wing]], float)
+        out.append(Path(pts, c.palette(r, v=0.88), dwell=0))
+    return out
+
+
+def sc_ribbon_tide_sky(c: Ctx) -> list[Path]:
+    """Dual counter-flowing sinusoidal liquid sky ribbons with traveling crest shimmer."""
+    x = np.linspace(-LIM, LIM, 28)
+    out: list[Path] = []
+    for layer in range(2):
+        dir_sign = 1.0 if layer == 0 else -1.0
+        ph = dir_sign * (c.bt * TAU / 14.0) + layer * 1.6
+        y_off = 0.30 - layer * 0.36 + 0.10 * smooth_wave(c.bt, 28.0)
+        amp = 0.15 + 0.05 * math.sin(c.bt * TAU / 12.0 + layer)
+        y = np.clip(y_off + amp * np.sin(1.6 * math.pi * x + ph), -LIM, LIM)
+        out.append(Path(np.stack([x, y], axis=1), c.palette(layer, v=0.90), dwell=0))
+    return out
+
+
+def sc_prism_horizon_deck(c: Ctx) -> list[Path]:
+    """Multi-plane horizon deck that breathes open and counter-tilts in harmonic layers."""
+    decks = c.count(2, 3)
+    spread = 0.18 + 0.24 * (0.5 + 0.5 * smooth_wave(c.bt, 16.0))
+    y_mid = 0.18 + 0.12 * smooth_wave(c.bt, 32.0)
+    out: list[Path] = []
+    for i in range(decks):
+        u = (i / max(decks - 1, 1)) - 0.5
+        tilt = (0.18 if i % 2 == 0 else -0.18) * smooth_wave(c.bt, 14.0)
+        y0 = float(np.clip(y_mid + u * 2.0 * spread - tilt, -LIM, LIM))
+        y1 = float(np.clip(y_mid + u * 2.0 * spread + tilt, -LIM, LIM))
+        out.append(line((-LIM, y0), (LIM, y1), c.palette(i, v=0.88), dwell=0))
     return out
 
 
 def sc_morphing_plane_sky(c: Ctx) -> list[Path]:
     morph = smooth_wave(c.bt, 16.0)
     y_center = 0.22 + 0.14 * smooth_wave(c.bt, 24.0)
-    tilt = 0.34 * morph
+    tilt = 0.36 * morph
     out = [
         line((-LIM, float(np.clip(y_center - tilt, -LIM, LIM))),
              (LIM, float(np.clip(y_center + tilt, -LIM, LIM))),
-             c.palette(0, v=0.88), dwell=0),
+             c.palette(0, v=0.90), dwell=0),
+        line((-LIM, float(np.clip(y_center + tilt * 0.85 - 0.32, -LIM, LIM))),
+             (LIM, float(np.clip(y_center - tilt * 0.85 - 0.32, -LIM, LIM))),
+             c.palette(1, v=0.86), dwell=0),
     ]
-    if c.detail >= 0.35:
-        out.append(
-            line((-LIM, float(np.clip(y_center + tilt * 0.8 - 0.32, -LIM, LIM))),
-                 (LIM, float(np.clip(y_center - tilt * 0.8 - 0.32, -LIM, LIM))),
-                 c.palette(1, v=0.84), dwell=0)
-        )
     return out
 
 
 def sc_breathe_horizon_sky(c: Ctx) -> list[Path]:
-    spread = 0.16 + 0.26 * (0.5 + 0.5 * smooth_wave(c.bt, 16.0))
+    spread = 0.16 + 0.28 * (0.5 + 0.5 * smooth_wave(c.bt, 16.0))
     y_mid = 0.20 + 0.12 * smooth_wave(c.bt, 32.0)
-    rock = 0.12 * smooth_wave(c.bt, 12.0)
+    rock = 0.14 * smooth_wave(c.bt, 12.0)
     out: list[Path] = []
     for idx, sign in enumerate((-1.0, 1.0)):
-        if idx == 1 and c.detail < 0.3:
-            break
         y0 = float(np.clip(y_mid + sign * spread - rock, -LIM, LIM))
         y1 = float(np.clip(y_mid + sign * spread + rock, -LIM, LIM))
-        out.append(line((-LIM, y0), (LIM, y1), c.palette(idx, v=0.84), dwell=0))
+        out.append(line((-LIM, y0), (LIM, y1), c.palette(idx, v=0.88), dwell=0))
     return out
 
 
 def sc_velvet_sky_sweep(c: Ctx) -> list[Path]:
     u = beat_sweep(c.bt, beats_per_pass=8.0, alternate=True)
     x_center = -0.72 + 1.44 * u
-    blades = c.count(1, 2)
-    width = 0.32 + 0.08 * smooth_wave(c.bt, 16.0)
+    blades = c.count(2, 3)
+    width = 0.34 + 0.10 * smooth_wave(c.bt, 16.0)
     out: list[Path] = []
     for i in range(blades):
         off = (i - (blades - 1) / 2.0) * width
         x = float(np.clip(x_center + off, -LIM, LIM))
-        out.append(line((x, -LIM), (x, LIM), c.palette(i, v=0.84), dwell=0))
+        out.append(line((x, -LIM), (x, LIM), c.palette(i, v=0.86), dwell=0))
     return out
 
 
 def sc_silk_wave_sky(c: Ctx) -> list[Path]:
-    x = np.linspace(-LIM, LIM, 26)
+    x = np.linspace(-LIM, LIM, 28)
     ph = c.bt * TAU / 16.0
-    y = np.clip(0.28 + 0.14 * smooth_wave(c.bt, 24.0) + 0.16 * np.sin(1.4 * math.pi * x + ph), -LIM, LIM)
-    return [Path(np.stack([x, y], axis=1), c.palette(0, v=0.88), dwell=0)]
+    y1 = np.clip(0.32 + 0.12 * smooth_wave(c.bt, 24.0) + 0.16 * np.sin(1.5 * math.pi * x + ph), -LIM, LIM)
+    y2 = np.clip(-0.04 + 0.12 * smooth_wave(c.bt, 24.0) + 0.14 * np.cos(1.5 * math.pi * x - ph * 0.8), -LIM, LIM)
+    return [
+        Path(np.stack([x, y1], axis=1), c.palette(0, v=0.90), dwell=0),
+        Path(np.stack([x, y2], axis=1), c.palette(1, v=0.82), dwell=0),
+    ]
 
 
 def sc_dual_horizon_mirage(c: Ctx) -> list[Path]:
-    ang = 0.28 * smooth_wave(c.bt, 20.0)
+    ang = 0.30 * smooth_wave(c.bt, 20.0)
     y_base = 0.24 + 0.12 * smooth_wave(c.bt, 32.0)
     return [
-        line((-LIM, y_base - ang), (LIM, y_base + ang), c.palette(0, v=0.86), dwell=0),
-        line((-LIM, y_base + ang * 0.6 - 0.34), (LIM, y_base - ang * 0.6 - 0.34), c.palette(1, v=0.82), dwell=0),
+        line((-LIM, y_base - ang), (LIM, y_base + ang), c.palette(0, v=0.88), dwell=0),
+        line((-LIM, y_base + ang * 0.65 - 0.34), (LIM, y_base - ang * 0.65 - 0.34), c.palette(1, v=0.84), dwell=0),
     ]
 
 
 def sc_floating_dot_constellation(c: Ctx) -> list[Path]:
-    y_sky = 0.10 + 0.12 * smooth_wave(c.bt, 24.0)
-    out: list[Path] = [line((-LIM, y_sky), (LIM, y_sky), c.palette(0, v=0.80), dwell=0)]
-    n_stars = c.count(5, 7)
+    y_sky = 0.12 + 0.12 * smooth_wave(c.bt, 24.0)
+    tilt = 0.14 * smooth_wave(c.bt, 16.0)
+    out: list[Path] = [line((-LIM, y_sky - tilt), (LIM, y_sky + tilt), c.palette(0, v=0.84), dwell=0)]
+    n_stars = c.count(6, 8)
     for s in range(n_stars):
         u = (s + 0.5) / n_stars
-        x = -0.82 + 1.64 * u + 0.05 * math.sin(c.bt * TAU / 16.0 + s)
-        y = 0.44 + 0.24 * math.sin(c.bt * TAU / 20.0 + s * 1.7)
-        out.append(hot_dot((x, y), c.palette(s + 1, v=0.90), dwell=2))
+        x = -0.84 + 1.68 * u + 0.05 * math.sin(c.bt * TAU / 16.0 + s)
+        y = 0.46 + 0.24 * math.sin(c.bt * TAU / 20.0 + s * 1.7)
+        out.append(hot_dot((x, y), c.palette(s + 1, v=0.92), dwell=2))
     return out
 
 
 def sc_slow_v_canopy_sky(c: Ctx) -> list[Path]:
-    y_apex = 0.12 + 0.16 * smooth_wave(c.bt, 24.0)
-    wing_lift = 0.28 + 0.22 * smooth_wave(c.bt, 16.0)
+    y_apex = 0.10 + 0.16 * smooth_wave(c.bt, 24.0)
+    wing_lift = 0.30 + 0.24 * smooth_wave(c.bt, 16.0)
     y_wing = float(np.clip(y_apex + wing_lift, -LIM, LIM))
     return [
-        line((-LIM, y_wing), (0.0, y_apex), c.palette(0, v=0.88), dwell=0),
-        line((0.0, y_apex), (LIM, y_wing), c.palette(1, v=0.88), dwell=0),
+        line((-LIM, y_wing), (0.0, y_apex), c.palette(0, v=0.90), dwell=0),
+        line((0.0, y_apex), (LIM, y_wing), c.palette(1, v=0.90), dwell=0),
     ]
 
 
 def sc_aurora_sky_curtain(c: Ctx) -> list[Path]:
-    x = np.linspace(-LIM, LIM, 26)
+    x = np.linspace(-LIM, LIM, 28)
     out: list[Path] = []
-    for layer in range(c.count(1, 2)):
+    for layer in range(c.count(2, 3)):
         ph = c.bt * TAU / 18.0 + layer * 2.1
-        y = 0.34 + 0.12 * smooth_wave(c.bt, 28.0) + 0.14 * np.sin(1.4 * math.pi * x + ph) - layer * 0.34
+        y = 0.38 + 0.12 * smooth_wave(c.bt, 28.0) + 0.14 * np.sin(1.4 * math.pi * x + ph) - layer * 0.30
         pts = np.stack([x, np.clip(y, -LIM, LIM)], axis=1)
-        out.append(Path(pts, c.palette(layer, v=0.86), dwell=0))
+        out.append(Path(pts, c.palette(layer, v=0.88), dwell=0))
     return out
 
 
-def _apply_synth_accent(paths: list[Path], age_beats: float, kind: int, c: Ctx) -> list[Path]:
-    if age_beats < 0.0 or age_beats >= 1.0:
-        return paths
-    env = math.sin(min(age_beats * 4.0, 1.0) * math.pi * 0.5) * ((1.0 - age_beats) ** 1.4)
-    if env <= 0.03:
-        return paths
-    col = c.palette(2, v=0.85 * env, white_boost=0.35)
-    if kind % 2 == 0:
-        y = -0.45 + 0.42 * age_beats
-        tilt = 0.12 * (1.0 if kind % 4 == 0 else -1.0)
-        return paths + [line((-LIM, y - tilt), (LIM, y + tilt), col, dwell=0)]
-    ox, oy = -0.36, -0.32
-    r = 0.14 + 0.26 * age_beats
-    burst = [hot_dot((ox + r * math.cos(k * TAU / 4.0 + age_beats * 0.8),
-                      oy + r * 0.7 * math.sin(k * TAU / 4.0 + age_beats * 0.8)), col, dwell=1)
-             for k in range(4)]
-    return paths + burst
+# ======================================================================== HIGH-INTENSITY RANDOMIZED PER-BEAT BREAKDOWN BURSTS
+
+BREAKDOWN_BURST_STYLES = (
+    "starburst_scatter",
+    "diagonal_slash",
+    "hot_beam_cluster",
+    "shock_ring",
+    "crosshair_planes",
+    "lightning_bolt",
+    "triple_pillars",
+)
 
 
-# ======================================================================== MAIN & DROP SCENES (HARMONIC SPLIT COLOR)
+def _apply_breakdown_beat_burst(
+    paths: list[Path],
+    beat_phase: float,
+    burst_params: dict,
+    c: Ctx,
+) -> list[Path]:
+    """High-intensity randomized per-beat aerial burst overlay during Breakdown sections."""
+    # Snappy attack (0 -> 0.08 beat) + punchy exponential decay across 72% of the beat
+    if beat_phase < 0.0 or beat_phase > 0.72:
+        return paths
+    if beat_phase < 0.08:
+        env = beat_phase / 0.08
+    else:
+        env = ((0.72 - beat_phase) / 0.64) ** 1.35
+    if env <= 0.04:
+        return paths
+
+    style = burst_params.get("style", "starburst_scatter")
+    cx = float(burst_params.get("cx", 0.0))
+    cy = float(burst_params.get("cy", 0.25))
+    ang = float(burst_params.get("ang", 0.4))
+    scale = float(burst_params.get("scale", 1.0))
+    c_idx = int(burst_params.get("c_idx", 1))
+    seeds = burst_params.get("seeds", ())
+
+    col_hot = c.palette(c_idx, v=1.0, white_boost=0.55 * env) * min(1.0, 0.35 + 0.85 * env)
+    col_acc = c.palette(c_idx + 1, v=1.0, white_boost=0.30 * env) * min(1.0, 0.30 + 0.80 * env)
+    extra: list[Path] = []
+
+    if style == "starburst_scatter":
+        n_pips = c.count(6, 10)
+        grow = (0.14 + 0.62 * (beat_phase / 0.72)) * scale
+        for i in range(n_pips):
+            a = ang + (i / max(n_pips, 1)) * TAU + (seeds[i % len(seeds)] - 0.5) * 0.35
+            r = grow * (0.65 + 0.55 * seeds[(i + 2) % len(seeds)])
+            px = cx + r * math.cos(a)
+            py = cy + r * 0.85 * math.sin(a)
+            extra.append(hot_dot((px, py), col_hot if i % 2 == 0 else col_acc, dwell=2))
+
+    elif style == "diagonal_slash":
+        seg = clipped_plane(cx, cy, ang, span=LIM)
+        if seg is not None:
+            extra.append(line(seg[0], seg[1], col_hot, dwell=0))
+        seg2 = clipped_plane(cx + 0.18 * math.cos(ang), cy + 0.18 * math.sin(ang), ang + 0.12, span=LIM)
+        if seg2 is not None and env > 0.35:
+            extra.append(line(seg2[0], seg2[1], col_acc, dwell=0))
+
+    elif style == "hot_beam_cluster":
+        n_dots = c.count(6, 9)
+        for i in range(n_dots):
+            sx = (seeds[(i * 2) % len(seeds)] * 2.0 - 1.0) * 0.86
+            sy = (seeds[(i * 2 + 1) % len(seeds)] * 2.0 - 1.0) * 0.82
+            extra.append(hot_dot((sx, sy), col_hot if i % 2 == 0 else col_acc, dwell=2))
+
+    elif style == "shock_ring":
+        rad = min((0.12 + 0.76 * (beat_phase / 0.72)) * scale, LIM)
+        sides = 6 if (c_idx % 2 == 0) else 12
+        extra.append(polygon_path(cx * 0.6, cy * 0.6, rad, rad * 0.86, sides, ang + beat_phase * 1.4, col_hot))
+
+    elif style == "crosshair_planes":
+        hx = float(np.clip(cx, -0.78, 0.78))
+        hy = float(np.clip(cy, -0.78, 0.78))
+        extra.append(line((-LIM, hy), (LIM, hy), col_hot, dwell=0))
+        extra.append(line((hx, -LIM), (hx, LIM), col_acc, dwell=0))
+
+    elif style == "lightning_bolt":
+        # Jagged randomized 5-vertex aerial bolt across the upper/mid frame
+        xs = np.linspace(-0.88, 0.88, 6)
+        ys = []
+        for idx_x in range(6):
+            jitter = (seeds[idx_x % len(seeds)] - 0.5) * 0.68 * scale
+            ys.append(float(np.clip(cy + jitter, -LIM, LIM)))
+        pts = np.stack([xs, np.array(ys, dtype=float)], axis=1)
+        extra.append(Path(pts, col_hot, dwell=0))
+
+    else:  # "triple_pillars"
+        for i in range(3):
+            px = float(np.clip(cx + (i - 1) * (0.28 + 0.26 * seeds[i % len(seeds)]), -LIM, LIM))
+            tilt = (seeds[(i + 3) % len(seeds)] - 0.5) * 0.24
+            extra.append(line((px - tilt, -LIM), (px + tilt, LIM), col_hot if i == 1 else col_acc, dwell=0))
+
+    return paths + extra
+
+
+# ======================================================================== MAIN, DROP & BUILD SCENES (NO FANS)
+
+def sc_laser_crown_vortex(c: Ctx) -> list[Path]:
+    """Counter-rotating nested laser star/crown polygons pulsing on the beat."""
+    pump = beat_pump(c)
+    r_out = 0.62 + 0.24 * pump
+    r_in = 0.28 + 0.14 * pump
+    rot1 = c.bt * 0.55
+    rot2 = -c.bt * 0.82
+    cx = 0.14 * smooth_wave(c.bt, 8.0)
+    cy = 0.10 * smooth_wave(c.bt, 12.0)
+    pts_n = c.count(5, 7)
+    out = [
+        star_polygon_path(cx, cy, r_out, r_in, pts_n, rot1, c.palette(0, v=1.0, white_boost=0.50 * pump)),
+    ]
+    if c.detail >= 0.35:
+        out.append(star_polygon_path(cx, cy, r_out * 0.56, r_in * 0.52, pts_n, rot2, c.palette(1, v=0.95)))
+    return out
+
+
+def sc_infinity_lissajous(c: Ctx) -> list[Path]:
+    """Smooth 3D figure-8 / Lissajous aerial ribbon loop with harmonic color gradient."""
+    pump = beat_pump(c)
+    t = np.linspace(0.0, TAU, 36)
+    ph = c.bt * TAU / 6.0
+    rx = 0.76 + 0.14 * pump
+    ry = 0.58 + 0.18 * pump
+    xs = np.clip(rx * np.sin(t + ph), -LIM, LIM)
+    ys = np.clip(ry * np.sin(2.0 * t + ph * 0.5), -LIM, LIM)
+    # Per-vertex color array triggers harmonic gradient along the ribbon
+    rgb_grad = np.ones((len(t), 3), dtype=float) * (0.85 + 0.15 * pump)
+    return [Path(np.stack([xs, ys], axis=1), rgb_grad, dwell=0)]
+
+
+def sc_diamond_tunnel(c: Ctx) -> list[Path]:
+    """Concentric rotating 4-point diamond/star tunnel rings zooming toward the viewer."""
+    pump = beat_pump(c)
+    frac = c.bt - math.floor(c.bt)
+    rings = c.count(2, 3)
+    cx = 0.18 * smooth_wave(c.bt, 8.0)
+    cy = 0.14 * smooth_wave(c.bt, 12.0)
+    out: list[Path] = []
+    for r_idx in range(rings):
+        phase = (frac + r_idx / rings) % 1.0
+        rad = 0.20 + 0.72 * phase
+        rot = (math.pi / 4.0) + 0.35 * smooth_wave(c.bt, 8.0) + r_idx * 0.38
+        col = c.palette(r_idx, v=1.0, white_boost=0.55 * pump if r_idx == 0 else 0.0)
+        out.append(polygon_path(cx, cy, rad, rad * 0.90, 4, rot, col))
+    return out
+
+
+def sc_prism_matrix_grid(c: Ctx) -> list[Path]:
+    """3x3 or 4x3 breathing aerial hot-beam dot grid with synchronized wave tilt."""
+    pump = beat_pump(c)
+    cols = c.count(3, 4)
+    rows = 3
+    spread_x = 1.38 + 0.24 * pump
+    spread_y = 1.18 + 0.22 * pump
+    tilt = 0.16 * smooth_wave(c.bt, 6.0)
+    out: list[Path] = []
+    for r in range(rows):
+        v_u = (r / max(rows - 1, 1)) - 0.5
+        for col_i in range(cols):
+            h_u = (col_i / max(cols - 1, 1)) - 0.5
+            x = h_u * spread_x + v_u * tilt
+            y = v_u * spread_y - h_u * tilt
+            col = c.palette(r * cols + col_i, white_boost=0.45 * pump if (r + col_i) % 2 == 0 else 0.0)
+            out.append(hot_dot((x, y), col, dwell=2))
+    return out
+
+
+def sc_kinetic_helix_wave(c: Ctx) -> list[Path]:
+    """Dual intertwined DNA-style sinusoidal laser ribbons rotating in phase."""
+    pump = beat_pump(c)
+    x = np.linspace(-LIM, LIM, 28)
+    ph = c.bt * TAU / 4.0
+    amp = 0.38 + 0.22 * pump
+    y1 = np.clip(amp * np.sin(2.0 * math.pi * x + ph), -LIM, LIM)
+    y2 = np.clip(amp * np.sin(2.0 * math.pi * x + ph + math.pi), -LIM, LIM)
+    return [
+        Path(np.stack([x, y1], axis=1), c.palette(0, v=1.0, white_boost=0.45 * pump), dwell=0),
+        Path(np.stack([x, y2], axis=1), c.palette(1, v=1.0, white_boost=0.45 * pump), dwell=0),
+    ]
+
+
+def sc_vortex_star_polygon(c: Ctx) -> list[Path]:
+    """Rotating hexagram (6-point star made of two counter-spinning triangles)."""
+    pump = beat_pump(c)
+    rad = 0.62 + 0.24 * pump
+    rot = c.bt * 0.48
+    cx = 0.14 * math.sin(c.bt * TAU / 12.0)
+    cy = 0.12 * math.cos(c.bt * TAU / 12.0)
+    return [
+        polygon_path(cx, cy, rad, rad * 0.92, 3, rot, c.palette(0, v=1.0, white_boost=0.50 * pump)),
+        polygon_path(cx, cy, rad, rad * 0.92, 3, -rot + math.pi / 3.0, c.palette(1, v=1.0, white_boost=0.50 * pump)),
+    ]
+
+
+def sc_laser_cage_box(c: Ctx) -> list[Path]:
+    """3D perspective wireframe tunnel box with shifting vanishing point."""
+    pump = beat_pump(c)
+    outer_s = 0.82
+    inner_s = 0.34 + 0.12 * pump
+    vx = 0.26 * smooth_wave(c.bt, 8.0)
+    vy = 0.20 * smooth_wave(c.bt, 12.0)
+    outer = np.array([[-outer_s, -outer_s], [outer_s, -outer_s], [outer_s, outer_s], [-outer_s, outer_s], [-outer_s, -outer_s]], float)
+    inner = np.array([[vx - inner_s, vy - inner_s], [vx + inner_s, vy - inner_s], [vx + inner_s, vy + inner_s], [vx - inner_s, vy + inner_s], [vx - inner_s, vy - inner_s]], float)
+    out: list[Path] = [
+        Path(outer, c.palette(0, v=1.0, white_boost=0.45 * pump), dwell=0),
+        Path(inner, c.palette(1, v=1.0, white_boost=0.45 * pump), dwell=0),
+    ]
+    if c.detail >= 0.45:
+        for corner_idx in range(4):
+            out.append(line(outer[corner_idx], inner[corner_idx], c.palette(2 + (corner_idx % 2), v=0.90), dwell=0))
+    return out
+
+
+def sc_shockwave_octagon(c: Ctx) -> list[Path]:
+    """Beat-triggered expanding octagonal rings with counter-rotating geometry."""
+    pump = beat_pump(c)
+    frac = c.bt - math.floor(c.bt)
+    rings = c.count(2, 3)
+    out: list[Path] = []
+    for i in range(rings):
+        ph = (frac + i / rings) % 1.0
+        r = 0.22 + 0.70 * math.sin(ph * math.pi * 0.5)
+        rot = (math.pi / 8.0) + (0.35 if i % 2 == 0 else -0.35) * c.bt
+        out.append(polygon_path(0.0, 0.0, r, r * 0.90, 8, rot, c.palette(i, v=1.0, white_boost=0.55 * pump if i == 0 else 0.0)))
+    return out
+
 
 def sc_concentric_tunnel(c: Ctx) -> list[Path]:
     pump = beat_pump(c)
@@ -652,7 +905,6 @@ def sc_half_plane_stagger(c: Ctx) -> list[Path]:
     y_right = -0.82 + 1.64 * (1.0 - u2)
     x_top = -0.84 + 1.68 * u2
     x_bot = -0.84 + 1.68 * (1.0 - u1)
-    # 4-way quadrant split — showcases Rectangular/Tetradic & Split-Complementary palettes
     return [
         line((-LIM, y_left), (-0.10, y_left + 0.08), c.palette(0, white_boost=0.5 * pump), dwell=0),
         line((LIM, y_right), (0.10, y_right - 0.08), c.palette(1, white_boost=0.5 * pump), dwell=0),
@@ -695,26 +947,6 @@ def sc_half_time_glide(c: Ctx) -> list[Path]:
     return out
 
 
-def sc_dotted_fan_burst(c: Ctx) -> list[Path]:
-    pump = beat_pump(c)
-    n = c.count(5, 7, max(c.energy, 0.45))
-    aim = 0.22 + 0.38 * smooth_wave(c.bt, 8.0)
-    spread = 0.44 + 0.20 * pump
-    ox = -0.54
-    out: list[Path] = []
-    for i in range(n):
-        u = (i / max(n - 1, 1)) - 0.5
-        ang = aim + u * 2.0 * spread
-        reach = 1.75 + 0.25 * math.cos(u * math.pi) + 0.18 * pump
-        p0, p1 = ray(ox, -LIM, ang, reach)
-        col = c.palette(i, v=1.0)
-        if i % 2 == 1:
-            out.extend(dotted_line(p0, p1, col, dots=4, dot_len=0.04, phase=c.bt * 2.0))
-        else:
-            out.append(line(p0, p1, col, dwell=0))
-    return out
-
-
 def sc_dot_matrix_sweep(c: Ctx) -> list[Path]:
     pump = beat_pump(c)
     u = beat_sweep(c.bt, beats_per_pass=1.0, alternate=True)
@@ -751,12 +983,8 @@ def sc_drop_hyper_strobe(c: Ctx) -> list[Path]:
         out.append(line((-LIM, y_top), (LIM, y_top), c.palette(1, white_boost=0.65 * pump), dwell=0))
         out.append(line((LIM, y_bot), (-LIM, y_bot), c.palette(2, white_boost=0.65), dwell=0))
     else:
-        n = c.count(5, 6)
-        aim = 0.20 + 0.42 * u
-        for i in range(n):
-            frac = (i / max(n - 1, 1)) - 0.5
-            p0, p1 = ray(-0.56, -LIM, aim + frac * 0.92, 2.3)
-            out.append(line(p0, p1, c.palette(i, white_boost=0.45), dwell=0))
+        r = 0.34 + 0.54 * u
+        out.append(star_polygon_path(0.0, 0.0, r, r * 0.45, 6, c.bt * 1.2, c.palette(0, white_boost=0.55)))
     return out
 
 
@@ -830,25 +1058,6 @@ def sc_multi_plane_cross_sweep(c: Ctx) -> list[Path]:
     return out
 
 
-def sc_twin_scissor_sweep(c: Ctx) -> list[Path]:
-    pump = beat_pump(c)
-    snare = snare_swell(c)
-    n = c.count(4, 5, max(c.energy, 0.45))
-    swing = 0.40 * smooth_wave(c.bt, 8.0)
-    out: list[Path] = []
-    for i in range(n):
-        u = (i / max(n - 1, 1)) - 0.5
-        ang = 0.32 + swing + u * (0.36 + 0.16 * pump)
-        p0, p1 = ray(-0.74, -LIM, ang, 2.2)
-        out.append(line(p0, p1, c.palette(0 if i % 2 == 0 else 2, v=1.0), dwell=0))
-    for i in range(max(3, n - 1)):
-        u = (i / max(n - 2, 1)) - 0.5
-        ang = math.pi - (0.34 - swing * 0.85 + u * (0.34 + 0.16 * snare))
-        p0, p1 = ray(-0.28, LIM, ang, 2.2)
-        out.append(line(p0, p1, c.palette(1 if i % 2 == 0 else 3, v=0.90 + 0.10 * snare), dwell=0))
-    return out
-
-
 def sc_drop_x_blades(c: Ctx) -> list[Path]:
     pump = beat_pump(c)
     planes = c.count(2, 3)
@@ -911,20 +1120,6 @@ def sc_alternating_horizon_gates(c: Ctx) -> list[Path]:
     ]
     if c.detail >= 0.45:
         out.extend(dotted_line((-0.88, 0.0), (0.88, 0.0), c.palette(2, v=0.9, white_boost=0.35 * pump), dots=4, dot_len=0.035, phase=c.bt * 2.0))
-    return out
-
-
-def sc_prism_dot_fan(c: Ctx) -> list[Path]:
-    pump = beat_pump(c)
-    n = c.count(4, 6)
-    aim = 0.28 + 0.38 * smooth_wave(c.bt, 6.0)
-    spread = 0.44 + 0.20 * pump
-    out: list[Path] = []
-    for i in range(n):
-        u = (i / max(n - 1, 1)) - 0.5
-        ang = aim + u * 2.0 * spread
-        p0, p1 = ray(-0.62, -LIM, ang, 2.25)
-        out.append(line(p0, p1, c.palette(i), dwell=0))
     return out
 
 
@@ -1002,22 +1197,31 @@ def sc_strobe_tunnel_ribs(c: Ctx) -> list[Path]:
     return out
 
 
-# ======================================================================== BUILD SECTION SCENES
+# ======================================================================== BUILD SECTION SCENES (NO FANS)
 
-def sc_build_converge_sweep(c: Ctx) -> list[Path]:
+def sc_build_helix_tighten(c: Ctx) -> list[Path]:
+    """Dual accelerating helix ribbons that compress toward center as build approaches 1.0."""
     b = c.f.build
-    n = c.count(5, 7, max(b, 0.45))
-    sweep = (0.44 * (1.0 - 0.65 * (b ** 2))) * math.sin(c.rt * TAU / 4.0)
-    bias = 0.30 * (1.0 - 0.7 * b)
-    spread = 0.52 * (1.0 - 0.76 * (b ** 2)) + 0.08
-    ox = -0.56 * (1.0 - 0.70 * b)
+    x = np.linspace(-LIM, LIM, 28)
+    ph = c.rt * 1.9
+    amp = 0.56 * (1.0 - 0.78 * b) + 0.06
+    y1 = np.clip(amp * np.sin(2.2 * math.pi * x + ph), -LIM, LIM)
+    y2 = np.clip(amp * np.sin(2.2 * math.pi * x + ph + math.pi), -LIM, LIM)
+    return [
+        Path(np.stack([x, y1], axis=1), c.palette(0, v=0.82 + 0.18 * b, white_boost=0.70 * (b ** 2)), dwell=0),
+        Path(np.stack([x, y2], axis=1), c.palette(1, v=0.82 + 0.18 * b, white_boost=0.70 * (b ** 2)), dwell=0),
+    ]
+
+
+def sc_build_tunnel_collapse(c: Ctx) -> list[Path]:
+    """Spinning concentric polygon tunnel tightening inward into a bright focal point."""
+    b = c.f.build
+    rings = c.count(2, 3)
     out: list[Path] = []
-    for i in range(n):
-        u = (i / max(n - 1, 1)) - 0.5
-        ang = bias + sweep + u * 2.0 * spread
-        p0, p1 = ray(ox, -LIM, ang, 2.3)
-        col = c.palette(i, v=0.80 + 0.20 * b, white_boost=0.70 * (b ** 2))
-        out.append(line(p0, p1, col, dwell=0))
+    for i in range(rings):
+        r = max(0.08, (0.86 - i * 0.22) * (1.0 - 0.78 * b) + 0.08)
+        rot = c.rt * (0.9 + 1.6 * b) * (1.0 if i % 2 == 0 else -1.0)
+        out.append(polygon_path(0.0, 0.0, r, r * 0.88, 6, rot, c.palette(i, v=0.82 + 0.18 * b, white_boost=0.75 * (b ** 2))))
     return out
 
 
@@ -1199,11 +1403,24 @@ def _morph_paths(prev_paths: list[Path], next_paths: list[Path], alpha: float) -
 
 
 SCENES = {
+    # New & Refreshed Aerial Geometry
+    "laser_crown_vortex": sc_laser_crown_vortex,
+    "infinity_lissajous": sc_infinity_lissajous,
+    "diamond_tunnel": sc_diamond_tunnel,
+    "prism_matrix_grid": sc_prism_matrix_grid,
+    "kinetic_helix_wave": sc_kinetic_helix_wave,
+    "vortex_star_polygon": sc_vortex_star_polygon,
+    "laser_cage_box": sc_laser_cage_box,
+    "shockwave_octagon": sc_shockwave_octagon,
     "concentric_tunnel": sc_concentric_tunnel,
     "rotating_laser_cone": sc_rotating_laser_cone,
     "hot_beam_matrix": sc_hot_beam_matrix,
     "orbital_plane_sweep": sc_orbital_plane_sweep,
+    # Upgraded Laser Sky Suite
     "liquid_sky_drift": sc_liquid_sky_drift,
+    "cathedral_sky_vault": sc_cathedral_sky_vault,
+    "ribbon_tide_sky": sc_ribbon_tide_sky,
+    "prism_horizon_deck": sc_prism_horizon_deck,
     "morphing_plane_sky": sc_morphing_plane_sky,
     "breathe_horizon_sky": sc_breathe_horizon_sky,
     "velvet_sky_sweep": sc_velvet_sky_sweep,
@@ -1212,51 +1429,49 @@ SCENES = {
     "floating_dot_constellation": sc_floating_dot_constellation,
     "slow_v_canopy_sky": sc_slow_v_canopy_sky,
     "aurora_sky_curtain": sc_aurora_sky_curtain,
+    # Kinetic Planes, Sweeps & Strobes
     "split_direction_sweep": sc_split_direction_sweep,
     "half_plane_stagger": sc_half_plane_stagger,
     "double_time_whip": sc_double_time_whip,
     "half_time_glide": sc_half_time_glide,
-    "dotted_fan_burst": sc_dotted_fan_burst,
     "dot_matrix_sweep": sc_dot_matrix_sweep,
     "drop_hyper_strobe": sc_drop_hyper_strobe,
     "full_width_wall": sc_full_width_wall,
     "full_height_sheet": sc_full_height_sheet,
     "multi_plane_cross_sweep": sc_multi_plane_cross_sweep,
-    "twin_scissor_sweep": sc_twin_scissor_sweep,
     "drop_x_blades": sc_drop_x_blades,
     "quadrant_mirror_sweep": sc_quadrant_mirror_sweep,
     "pendulum_beam_bar": sc_pendulum_beam_bar,
     "crisscross_ribbon_planes": sc_crisscross_ribbon_planes,
     "alternating_horizon_gates": sc_alternating_horizon_gates,
-    "prism_dot_fan": sc_prism_dot_fan,
     "hyper_bar_ricochet": sc_hyper_bar_ricochet,
     "horizontal_plane_blast": sc_horizontal_plane_blast,
     "quad_corner_lasers": sc_quad_corner_lasers,
     "strobe_tunnel_ribs": sc_strobe_tunnel_ribs,
-    "build_converge_sweep": sc_build_converge_sweep,
+    # Build Scenes
+    "build_helix_tighten": sc_build_helix_tighten,
+    "build_tunnel_collapse": sc_build_tunnel_collapse,
     "build_rising_sheet": sc_build_rising_sheet,
     "build_prism_tighten": sc_build_prism_tighten,
     "build_accelerating_bars": sc_build_accelerating_bars,
     "build_dot_convergence": sc_build_dot_convergence,
     "build_split_pinch": sc_build_split_pinch,
+    # Legacy aliases (zero fan effects)
     "tunnel": sc_concentric_tunnel,
     "tunnel_fast": sc_strobe_tunnel_ribs,
-    "beam_fan": sc_dotted_fan_burst,
-    "starburst": sc_orbital_plane_sweep,
+    "starburst": sc_laser_crown_vortex,
     "starburst_fast": sc_hot_beam_matrix,
-    "lissajous": sc_rotating_laser_cone,
-    "scope": sc_dot_matrix_sweep,
+    "lissajous": sc_infinity_lissajous,
+    "scope": sc_kinetic_helix_wave,
     "spiral": sc_rotating_laser_cone,
     "spiral_slow": sc_velvet_sky_sweep,
-    "grid": sc_hot_beam_matrix,
+    "grid": sc_prism_matrix_grid,
     "drop_blast": sc_horizontal_plane_blast,
     "breath": sc_breathe_horizon_sky,
-    "riser": sc_build_prism_tighten,
-    "ring_pulse": sc_concentric_tunnel,
-    "sky_fan": sc_morphing_plane_sky,
+    "riser": sc_build_tunnel_collapse,
+    "ring_pulse": sc_shockwave_octagon,
     "sky_cross": sc_dual_horizon_mirage,
-    "scan_sweep": sc_silk_wave_sky,
-    "build_fan": sc_build_converge_sweep,
+    "scan_sweep": sc_ribbon_tide_sky,
     "build_scan": sc_build_rising_sheet,
     "strobe_poly": sc_drop_hyper_strobe,
     "strobe_beams": sc_hyper_bar_ricochet,
@@ -1265,39 +1480,50 @@ SCENES = {
 
 QUICK_CUES: list[tuple[str, str]] = [
     ("liquid_sky_drift", "Liquid Sky"),
-    ("dotted_fan_burst", "Beam Fan"),
+    ("laser_crown_vortex", "Laser Crown"),
     ("concentric_tunnel", "Tunnel"),
     ("hot_beam_matrix", "Hot Beams"),
-    ("rotating_laser_cone", "Laser Cone"),
-    ("multi_plane_cross_sweep", "Cross Planes"),
-    ("silk_wave_sky", "Wave Sheet"),
-    ("alternating_horizon_gates", "Horizon Gates"),
+    ("infinity_lissajous", "Lissajous"),
+    ("kinetic_helix_wave", "Helix Wave"),
+    ("cathedral_sky_vault", "Sky Vault"),
+    ("diamond_tunnel", "Diamond Ring"),
 ]
 
 POOLS = {
     MAIN: [
+        "laser_crown_vortex",
+        "infinity_lissajous",
+        "diamond_tunnel",
+        "prism_matrix_grid",
+        "kinetic_helix_wave",
+        "vortex_star_polygon",
+        "laser_cage_box",
+        "shockwave_octagon",
         "concentric_tunnel",
         "rotating_laser_cone",
         "split_direction_sweep",
         "half_plane_stagger",
-        "dotted_fan_burst",
         "dot_matrix_sweep",
         "half_time_glide",
         "full_width_wall",
         "full_height_sheet",
         "orbital_plane_sweep",
         "multi_plane_cross_sweep",
-        "twin_scissor_sweep",
         "quadrant_mirror_sweep",
         "pendulum_beam_bar",
         "crisscross_ribbon_planes",
         "alternating_horizon_gates",
-        "prism_dot_fan",
     ],
     DROP: [
         "drop_hyper_strobe",
+        "laser_crown_vortex",
+        "diamond_tunnel",
+        "shockwave_octagon",
+        "vortex_star_polygon",
+        "laser_cage_box",
         "concentric_tunnel",
         "hot_beam_matrix",
+        "prism_matrix_grid",
         "double_time_whip",
         "hyper_bar_ricochet",
         "horizontal_plane_blast",
@@ -1306,25 +1532,28 @@ POOLS = {
         "split_direction_sweep",
         "orbital_plane_sweep",
         "half_plane_stagger",
-        "dot_matrix_sweep",
         "multi_plane_cross_sweep",
         "drop_x_blades",
     ],
     BREAKDOWN: [
         "liquid_sky_drift",
+        "cathedral_sky_vault",
+        "ribbon_tide_sky",
+        "prism_horizon_deck",
+        "aurora_sky_curtain",
+        "silk_wave_sky",
         "morphing_plane_sky",
         "breathe_horizon_sky",
         "velvet_sky_sweep",
-        "silk_wave_sky",
         "dual_horizon_mirage",
         "floating_dot_constellation",
         "slow_v_canopy_sky",
-        "aurora_sky_curtain",
     ],
     BUILD: [
+        "build_helix_tighten",
+        "build_tunnel_collapse",
         "build_prism_tighten",
         "build_rising_sheet",
-        "build_converge_sweep",
         "build_accelerating_bars",
         "build_dot_convergence",
         "build_split_pinch",
@@ -1357,7 +1586,8 @@ DROP_IMPACT_BEATS = 1.5
 
 
 class FXEngine:
-    """High-FPS FX engine with Color-Theory Harmony Palettes & Art-Net RGB override support."""
+    """High-FPS FX engine with upgraded Laser Sky, randomized per-beat Breakdown bursts,
+    Color-Theory Harmony Palettes & Art-Net RGB override support."""
 
     def __init__(self, seed: int = 1, force_scene: str | None = None):
         self.rng = np.random.default_rng(seed)
@@ -1379,10 +1609,11 @@ class FXEngine:
         self._drop_impact_variant: int = 0
         self._drop_impact_bag: list[int] = []
 
-        self._melodic_avg: float = 0.0
-        self._prev_melodic: float = 0.0
-        self._synth_accent_age: float = 99.0
-        self._synth_accent_kind: int = 0
+        # Per-beat randomized burst state for Breakdown sections
+        self._burst_bag: list[str] = []
+        self._burst_beat_idx: int = -1
+        self._burst_params: dict = {}
+        self._roll_breakdown_burst(-1)
 
         self.modifier: str | None = None
         self._morph_left = 0.0
@@ -1398,9 +1629,27 @@ class FXEngine:
         self._seq_bag: list[str] = []
         self._harmony_bag: list[str] = []
 
+    def _roll_breakdown_burst(self, beat_idx: int):
+        if beat_idx == self._burst_beat_idx and self._burst_params:
+            return
+        self._burst_beat_idx = beat_idx
+        if not self._burst_bag:
+            self._burst_bag = list(BREAKDOWN_BURST_STYLES)
+            self.rng.shuffle(self._burst_bag)
+        style = self._burst_bag.pop(0)
+        self._burst_params = {
+            "style": style,
+            "cx": float(self.rng.uniform(-0.68, 0.68)),
+            "cy": float(self.rng.uniform(-0.45, 0.68)),
+            "ang": float(self.rng.uniform(-math.pi * 0.45, math.pi * 0.45)),
+            "scale": float(self.rng.uniform(0.85, 1.35)),
+            "c_idx": int(self.rng.integers(0, 4)),
+            "seeds": tuple(float(x) for x in self.rng.random(12)),
+        }
+
     def _pick_auto_harmony(self, section: str):
         if section == BREAKDOWN:
-            choices = ["analogous", "split_complementary"]
+            choices = ["analogous", "split_complementary", "triadic"]
         elif section == BUILD:
             choices = ["split_complementary", "triadic"]
         elif section == DROP:
@@ -1549,6 +1798,10 @@ class FXEngine:
                 self._drop_impact_variant = self._pick_drop_impact_variant()
                 self._morph_left = 0.0
 
+        beat_idx = int(math.floor(bt))
+        beat_frac = bt - beat_idx
+        self._roll_breakdown_burst(beat_idx)
+
         if f.beat_count != self._last_beat:
             if f.bar_pos == 0:
                 self.bars += 1
@@ -1562,7 +1815,7 @@ class FXEngine:
         if f.section == DROP:
             base_hue = [0.0, 0.1, 0.2, 0.4][(f.beat_count // 16) % 4]
         elif f.section == BREAKDOWN:
-            base_hue = 0.0
+            base_hue = [0.0, 0.2, 0.5, 0.7][(f.beat_count // 8) % 4]
 
         active_harmony = self._auto_harmony if self.harmony_mode == "auto" else self.harmony_mode
         if artnet is not None and artnet.connected and artnet.harmony_override:
@@ -1578,19 +1831,6 @@ class FXEngine:
                 self._slot_morph_left = max(0.0, self._slot_morph_left - dbt)
             if self._drop_impact_left > 0.0:
                 self._drop_impact_left = max(0.0, self._drop_impact_left - dbt)
-            self._synth_accent_age += dbt
-
-        melodic = 0.65 * f.mid + 0.35 * f.high + 0.25 * getattr(f, "snare", 0.0)
-        self._melodic_avg = 0.92 * self._melodic_avg + 0.08 * melodic
-        if (
-            f.section == BREAKDOWN
-            and self._synth_accent_age > 1.25
-            and melodic > max(self._melodic_avg * 1.18, 0.28)
-            and melodic > self._prev_melodic + 0.03
-        ):
-            self._synth_accent_age = 0.0
-            self._synth_accent_kind += 1
-        self._prev_melodic = melodic
 
         if not self.scene or (f.section == SILENCE and not self.force):
             return [], None
@@ -1653,8 +1893,9 @@ class FXEngine:
 
         paths = _apply_modifier(paths, self.modifier, c)
 
-        if f.section == BREAKDOWN and self._synth_accent_age < 1.0 and not self.force:
-            paths = _apply_synth_accent(paths, self._synth_accent_age, self._synth_accent_kind, c)
+        # High-intensity randomized per-beat bursts layered onto Breakdown Laser Sky scenes
+        if f.section == BREAKDOWN and not self.force:
+            paths = _apply_breakdown_beat_burst(paths, beat_frac, self._burst_params, c)
 
         paths = _apply_split_color_harmony(paths, pal, artnet)
 
@@ -1667,7 +1908,9 @@ class FXEngine:
         else:
             label = self.scene
 
-        if self.modifier:
+        if f.section == BREAKDOWN and not self.force:
+            label = f"{label}+burst:{self._burst_params.get('style', '')}"
+        elif self.modifier:
             label = f"{label}+{self.modifier}"
         if artnet is not None and artnet.connected:
             label = f"{label} · ART-NET"
