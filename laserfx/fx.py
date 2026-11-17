@@ -2092,3 +2092,249 @@ class FXEngine:
         if artnet is not None and artnet.connected:
             label = f"{label} · ART-NET"
         return _optimize_path_order(paths), label
+
+# ======================================================================== EXTRA SCENES (mirrored-pair beam chases / sweeping bars)
+# Designed for two projectors on one DAC output, one inverted in its hardware menu: image + mirror_x(image) is the
+# intended picture (sweeps meet mid-field, diagonals cross, chevrons converge, rotations counter-rotate).
+
+# ------------------------------------------------------------------------------ helpers
+def _ease(t: float) -> float:
+    t = min(max(t, 0.0), 1.0)
+    return t * t * (3.0 - 2.0 * t)
+
+
+def _lane_x(i: int, lanes: int) -> float:
+    return -0.84 + 1.68 * i / max(lanes - 1, 1)
+
+
+def _clip(v):
+    return np.clip(v, -LIM, LIM)
+
+
+def mirror_x(paths: list[Path]) -> list[Path]:
+    """What the hardware-inverted projector shows (left<->right)."""
+    return [Path(p.pts * np.array([-1.0, 1.0]), p.rgb, p.dwell) for p in paths]
+
+
+def with_mirror(paths: list[Path]) -> list[Path]:
+    """Image plus its mirror, for a SINGLE projector that should look like the pair."""
+    return list(paths) + mirror_x(paths)
+
+
+# ------------------------------------------------------------------------------ MAIN / DROP
+def sc_beat_bar_sweep(c: Ctx) -> list[Path]:
+    """On-beat sweeping bars: one eased pass of the field per beat, ping-pong, with fading echo bars behind.
+    The mirrored projector sweeps the other way, so the bar pairs pass through each other mid-beat."""
+    pump = beat_pump(c)
+    bars = c.count(1, 2)
+    lean = 0.14 * smooth_wave(c.bt, 8.0)
+    gap = 0.30
+    out: list[Path] = []
+    for k in range(3 if c.detail >= 0.4 else 2):                  # k = 0 head, then echoes
+        u = beat_sweep(c.bt - 0.07 * k, 1.0, True)
+        xc = -0.80 + 1.60 * u
+        v = (1.0, 0.45, 0.22)[k]
+        for i in range(bars):
+            x = xc + (i - (bars - 1) / 2.0) * gap
+            col = c.palette(i, v=v, white_boost=0.55 * pump if k == 0 else 0.0)
+            out.append(line((float(_clip(x - lean)), -LIM), (float(_clip(x + lean)), LIM), col))
+    return out
+
+
+def _lane_chase(c: Ctx, step_f: float, duty: float | None = None, lanes: int = 8, tail: int = 2,
+                boost: float = 0.0) -> list[Path]:
+    """A lit bar hopping lane to lane (bouncing at the edges), leaving a short fading tail."""
+    step = int(math.floor(step_f))
+    sub = step_f - step
+    if duty is not None and c.strobe and sub > duty:               # hard off-time between hops
+        return []
+    pump = beat_pump(c)
+    span = 2 * lanes - 2
+    k = step % span
+    head = k if k < lanes else span - k
+    dirn = 1 if k < lanes - 1 else -1
+    pal = (step // lanes) % 4
+    out: list[Path] = []
+    for j in range(tail + 1):
+        i = head - dirn * j
+        if not 0 <= i < lanes:
+            continue
+        v = 1.0 if j == 0 else (0.5, 0.25, 0.12)[min(j - 1, 2)]
+        col = c.palette(pal, v=v, white_boost=boost * pump if j == 0 else 0.0)
+        x = _lane_x(i, lanes)
+        a, b = (x, -LIM), (x, LIM)
+        out.append(line(*((a, b) if j % 2 == 0 else (b, a)), col))
+    return out
+
+
+def sc_bar_chase_lanes(c: Ctx) -> list[Path]:
+    """Running-light chase across 8 vertical lanes at 8th notes. Mirrored projector runs the opposite way,
+    so the two heads collide in the centre."""
+    return _lane_chase(c, c.bt * 2.0, tail=c.count(1, 3), boost=0.4)
+
+
+def sc_drop_lane_chase(c: Ctx) -> list[Path]:
+    """The same chase at 16th notes with hard blackout gaps and white-hot heads."""
+    return _lane_chase(c, c.bt * 4.0, duty=0.58, tail=1, boost=0.75)
+
+
+def sc_beam_chase_diagonals(c: Ctx) -> list[Path]:
+    """Two diagonal beams (opposite sides of the field) chasing across 7 positions at 8th notes, each with a dim
+    follower. Slant flips every 8 beats; on the mirrored projector the slant is reversed, so beams cross."""
+    pump = beat_pump(c)
+    n = 7
+    head = int(math.floor(c.bt * 2.0)) % n
+    phi = (-0.85 if (int(c.bt // 8) % 2) else 0.85)
+    out: list[Path] = []
+    for i, v, pal in ((head, 1.0, 0), ((head - 1) % n, 0.45, 0), ((head + 3) % n, 1.0, 1), ((head + 2) % n, 0.45, 1)):
+        x0 = -0.90 + 1.80 * i / (n - 1)
+        seg = clipped_plane(x0, 0.0, phi + math.pi / 2.0)
+        if seg is not None:
+            out.append(line(seg[0], seg[1], c.palette(pal, v=v, white_boost=0.5 * pump if v == 1.0 else 0.0)))
+    return out
+
+
+_SCISSOR = (0.35, 0.95, 0.60, 1.30)           # half-opening angle (rad from vertical) per half-beat step
+
+
+def sc_scissor_snap(c: Ctx) -> list[Path]:
+    """Two long beams crossing at a drifting pivot; the opening angle snaps every half beat (eased in 30%).
+    The mirrored pivot drifts the opposite way, so two scissors cross each other."""
+    pump = beat_pump(c)
+    sf = c.bt * 2.0
+    step = int(math.floor(sf))
+    a = _SCISSOR[(step - 1) % 4] + (_SCISSOR[step % 4] - _SCISSOR[(step - 1) % 4]) * _ease((sf - step) / 0.3)
+    px = 0.30 * smooth_wave(c.bt, 8.0)
+    out: list[Path] = []
+    for i, sign in enumerate((1.0, -1.0)):
+        seg = clipped_plane(px, 0.0, -sign * a)
+        if seg is not None:
+            out.append(line(seg[0], seg[1], c.palette(i, v=1.0, white_boost=0.5 * pump)))
+    if c.detail >= 0.6:
+        out.append(line((-LIM, 0.0), (LIM, 0.0), c.palette(2, v=0.45)))
+    return out
+
+
+_S = 0.84
+_CORNERS = [(-_S, -_S), (_S, -_S), (_S, _S), (-_S, _S)]
+
+
+def _perim(s: float, scale: float = 1.0):
+    s %= 4.0
+    i = int(s) % 4                     # s can round to exactly 4.0
+    t = min(max(s - i, 0.0), 1.0) if int(s) < 4 else 0.0
+    a, b = _CORNERS[i], _CORNERS[(i + 1) % 4]
+    return ((a[0] + (b[0] - a[0]) * t) * scale, (a[1] + (b[1] - a[1]) * t) * scale)
+
+
+def _comet(head: float, length: float, scale: float, col: np.ndarray, flip: bool) -> Path:
+    s0 = head - length
+    ss = set(np.linspace(s0, head, 12).tolist())
+    k = math.floor(s0) + 1
+    while k < head:                                   # keep exact corners so the turns stay sharp
+        ss.add(float(k))
+        k += 1
+    pts = np.array([_perim(s, scale) for s in sorted(ss)])
+    if flip:
+        pts[:, 0] *= -1.0
+    fade = np.linspace(0.10, 1.0, len(pts))[:, None]
+    return Path(pts, np.clip(col[None, :] * fade, 0.0, 1.0), dwell=2)
+
+
+def sc_perimeter_comet(c: Ctx) -> list[Path]:
+    """Comets racing around the frame (one lap per 2 beats), plus a counter-rotating inner pair.
+    On the mirrored projector every lap runs the other way."""
+    pump = beat_pump(c)
+    h = ((c.bt / 2.0) % 1.0) * 4.0
+    out = [_comet(h, 1.1, 1.0, c.palette(0, white_boost=0.5 * pump), False),
+           _comet(h + 2.0, 1.1, 1.0, c.palette(1, white_boost=0.5 * pump), False)]
+    if c.detail >= 0.5:
+        out.append(_comet(h + 1.0, 0.9, 0.5, c.palette(2, v=0.9), True))
+        out.append(_comet(h + 3.0, 0.9, 0.5, c.palette(3, v=0.9), True))
+    return out
+
+
+def _chevrons(c: Ctx, speed: float) -> list[Path]:
+    pump = beat_pump(c)
+    n = c.count(3, 5)
+    spacing = 1.8 / n
+    ph = (c.bt * speed) % 1.0
+    out: list[Path] = []
+    for k in range(n + 1):
+        x = -0.9 + (k + ph) * spacing
+        if x > LIM:
+            continue
+        v = (0.35 + 0.65 * (x + 0.9) / 1.8) * min(1.0, (x + 0.9) / 0.3)       # fade in at the left edge
+        h, d = 0.55, 0.18
+        pts = np.array([[x - d, h], [x, 0.0], [x - d, -h]])
+        pts[:, 0] = _clip(pts[:, 0])
+        out.append(Path(pts, c.palette(k, v=max(v, 0.0), white_boost=0.5 * pump if k == n else 0.0), dwell=2))
+    return out
+
+
+def sc_chevron_run(c: Ctx) -> list[Path]:
+    """Chevrons >>> marching across on the beat. The mirrored projector shows <<<, so the arrows converge."""
+    return _chevrons(c, 0.5)
+
+
+def sc_drop_chevron_run(c: Ctx) -> list[Path]:
+    """Double-speed chevrons, gated into 8th-note flashes."""
+    return _chevrons(c, 1.0) if strobe_gate(c, div=2.0, duty=0.62) else []
+
+
+def sc_eq_bars(c: Ctx) -> list[Path]:
+    """Seven vertical bars that react to the music: bass in the middle, mids beside it, highs at the edges.
+    Symmetric about both axes, so it reads the same on both projectors."""
+    pump = beat_pump(c)
+    bass, mid, high = c.f.bass, c.f.mid, c.f.high
+    out: list[Path] = []
+    for i in range(7):
+        d = abs(i - 3) / 3.0
+        band = (1.0 - d) * bass + d * (0.6 * mid + 0.4 * high)
+        band = min(max(band, 0.0), 1.0)
+        h = 0.14 + 0.74 * min(1.0, band * (0.8 + 0.4 * pump))
+        x = -0.78 + 1.56 * i / 6.0
+        out.append(line((x, -h), (x, h), c.palette(i, v=0.7 + 0.3 * band, white_boost=0.5 * pump if i == 3 else 0.0)))
+    return out
+
+
+# ------------------------------------------------------------------------------ BUILD
+def sc_build_lane_accel(c: Ctx) -> list[Path]:
+    """Lane chase that accelerates through the build (driven by rise-time), tail growing and heads whitening."""
+    b = min(max(c.f.build, 0.0), 1.0)
+    return _lane_chase(c, c.rt * 2.0, tail=1 + int(2 * b), boost=0.85 * b * b)
+
+
+NEW_SCENES = {
+    "beat_bar_sweep": sc_beat_bar_sweep,
+    "bar_chase_lanes": sc_bar_chase_lanes,
+    "drop_lane_chase": sc_drop_lane_chase,
+    "beam_chase_diagonals": sc_beam_chase_diagonals,
+    "scissor_snap": sc_scissor_snap,
+    "perimeter_comet": sc_perimeter_comet,
+    "chevron_run": sc_chevron_run,
+    "drop_chevron_run": sc_drop_chevron_run,
+    "eq_bars": sc_eq_bars,
+    "build_lane_accel": sc_build_lane_accel,
+}
+
+NEW_POOLS = {
+    MAIN: ["beat_bar_sweep", "bar_chase_lanes", "beam_chase_diagonals", "scissor_snap", "perimeter_comet",
+           "chevron_run", "eq_bars"],
+    DROP: ["drop_lane_chase", "drop_chevron_run", "scissor_snap", "beam_chase_diagonals", "beat_bar_sweep"],
+    BUILD: ["build_lane_accel"],
+    BREAKDOWN: [],
+}
+
+
+def install() -> None:
+    """Idempotent: add the scenes to SCENES and the section pools."""
+    SCENES.update(NEW_SCENES)
+    for section, names in NEW_POOLS.items():
+        pool = POOLS.setdefault(section, [])
+        for n in names:
+            if n not in pool:
+                pool.append(n)
+
+
+install()
