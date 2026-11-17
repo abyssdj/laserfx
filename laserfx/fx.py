@@ -1,5 +1,5 @@
 """LaserFX Effect Engine: coherent aerial choreography (Laser Sky, Tunnels, Cones, Crowns,
-Lissajous, Helix Waves, Hot-Beam Matrices, Wide-Coverage Blackout Chasers),
+Lissajous, Helix Waves, Hot-Beam Matrices, Wide-Coverage Blackout Chasers, Beaded Planes),
 randomized per-beat Breakdown bursts, color-theory harmony palettes, Art-Net RGB override,
 and nearest-neighbor path sorting.
 """
@@ -150,6 +150,30 @@ def hot_dot(pt, rgb=WHITE, dwell: int = 2) -> Path:
     y = float(np.clip(pt[1], -LIM, LIM))
     dx = 0.006 if x < (LIM - 0.02) else -0.006
     return Path(np.array([[x, y], [x + dx, y]], dtype=float), rgb, dwell)
+
+
+def beam_plane_beads(
+    a,
+    b,
+    rgb,
+    count: int = 4,
+    dwell: int = 3,
+    phase: float = 0.0,
+    include_ends: bool = True,
+) -> list[Path]:
+    """Place high-dwell hot-beam anchor dots along a line plane to create distinct aerial shafts."""
+    a = np.asarray(a, dtype=float)
+    b = np.asarray(b, dtype=float)
+    n = max(int(count), 2)
+    if include_ends and abs(phase) < 1e-6:
+        ts = np.linspace(0.0, 1.0, n)
+    else:
+        ts = ((np.arange(n, dtype=float) + 0.5 + (phase % 1.0)) / n) % 1.0
+    out: list[Path] = []
+    for t in ts:
+        pt = a + (b - a) * float(t)
+        out.append(hot_dot(pt, rgb, dwell=dwell))
+    return out
 
 
 def dotted_line(a, b, rgb, dots: int = 5, dot_len: float = 0.036, phase: float = 0.0) -> list[Path]:
@@ -464,6 +488,28 @@ def _drop_impact_effect(c: Ctx, progress: float, variant: int) -> list[Path]:
 
 # ======================================================================== IMPROVED LASER SKY SCENES (BREAKDOWN)
 
+def sc_beaded_sky_canopy(c: Ctx) -> list[Path]:
+    """Dual breathing Laser Sky sheets studded with high-dwell hot-beam anchors."""
+    y_base = 0.24 + 0.14 * smooth_wave(c.bt, 28.0)
+    tilt = 0.20 * smooth_wave(c.bt, 16.0)
+    beads = c.count(4, 6)
+    out: list[Path] = []
+    for idx, gap in enumerate((-0.18, 0.18)):
+        s = 1.0 if idx == 0 else -1.0
+        a = (-LIM, float(np.clip(y_base + gap - s * tilt, -LIM, LIM)))
+        b = (LIM, float(np.clip(y_base + gap + s * tilt, -LIM, LIM)))
+        out.append(line(a, b, c.palette(idx, v=0.82), dwell=0))
+        out.extend(beam_plane_beads(
+            a, b,
+            c.palette(idx + 1, v=1.0, white_boost=0.35),
+            count=beads,
+            dwell=3,
+            phase=c.bt * 0.15 * s,
+            include_ends=False,
+        ))
+    return out
+
+
 def sc_liquid_sky_drift(c: Ctx) -> list[Path]:
     """Multi-tier Liquid Sky: 2–3 layered rolling atmospheric sheets with phase-offset pitch waves."""
     planes = c.count(2, 3)
@@ -717,7 +763,6 @@ def sc_blackout_zone_chase(c: Ctx) -> list[Path]:
     step_f = c.bt * 4.0
     step = int(math.floor(step_f))
     sub = step_f - step
-    # Hard blackout gap on the trailing 38% of every 16th-note step
     if sub > 0.62:
         return []
     pump = beat_pump(c)
@@ -725,32 +770,32 @@ def sc_blackout_zone_chase(c: Ctx) -> list[Path]:
     col_a = c.palette(zone, v=1.0, white_boost=0.65 * pump)
     col_b = c.palette(zone + 1, v=1.0, white_boost=0.45 * pump)
 
-    if zone == 0:    # Wide Upper Sky Deck
+    if zone == 0:
         return [
             line((-LIM, 0.78), (LIM, 0.62), col_a, dwell=0),
             line((LIM, 0.36), (-LIM, 0.48), col_b, dwell=0),
         ]
-    elif zone == 1:  # Wide Lower Floor Deck
+    elif zone == 1:
         return [
             line((-LIM, -0.78), (LIM, -0.62), col_a, dwell=0),
             line((LIM, -0.36), (-LIM, -0.48), col_b, dwell=0),
         ]
-    elif zone == 2:  # Wide Left Wing Wall
+    elif zone == 2:
         return [
             line((-0.82, -LIM), (-0.66, LIM), col_a, dwell=0),
             line((-0.38, LIM), (-0.50, -LIM), col_b, dwell=0),
         ]
-    elif zone == 3:  # Wide Right Wing Wall
+    elif zone == 3:
         return [
             line((0.82, -LIM), (0.66, LIM), col_a, dwell=0),
             line((0.38, LIM), (0.50, -LIM), col_b, dwell=0),
         ]
-    elif zone == 4:  # Full-Span Diagonal Slash A
+    elif zone == 4:
         return [
             line((-LIM, -0.84), (LIM, 0.84), col_a, dwell=0),
             line((-0.72, -LIM), (LIM, 0.56), col_b, dwell=0),
         ]
-    else:            # Full-Span Diagonal Slash B
+    else:
         return [
             line((-LIM, 0.84), (LIM, -0.84), col_a, dwell=0),
             line((-0.72, LIM), (LIM, -0.56), col_b, dwell=0),
@@ -832,6 +877,30 @@ def sc_pingpong_blackout_whip(c: Ctx) -> list[Path]:
 
 
 # ======================================================================== MAIN, DROP & BUILD SCENES (NO FANS)
+
+def sc_beaded_horizon_planes(c: Ctx) -> list[Path]:
+    """Sweeping horizontal planes studded with 4–6 high-dwell hot-beam anchors."""
+    pump = beat_pump(c)
+    u = beat_sweep(c.bt, beats_per_pass=2.0, alternate=True)
+    y_center = -0.64 + 1.28 * u
+    slant = 0.18 * smooth_wave(c.bt, 6.0)
+    beads = c.count(4, 6)
+    out: list[Path] = []
+    for idx, off in enumerate((-0.24, 0.24)):
+        y0 = float(np.clip(y_center + off - slant, -LIM, LIM))
+        y1 = float(np.clip(y_center + off + slant, -LIM, LIM))
+        a, b = (-LIM, y0), (LIM, y1)
+        out.append(line(a, b, c.palette(idx, v=0.88), dwell=0))
+        out.extend(beam_plane_beads(
+            a, b,
+            c.palette(idx + 2, v=1.0, white_boost=0.55 * pump),
+            count=beads,
+            dwell=3,
+            phase=c.bt * (0.35 if idx == 0 else -0.35),
+            include_ends=False,
+        ))
+    return out
+
 
 def sc_laser_crown_vortex(c: Ctx) -> list[Path]:
     """Counter-rotating nested laser star/crown polygons pulsing on the beat."""
@@ -1436,11 +1505,35 @@ def _apply_modifier(paths: list[Path], mod: str, c: Ctx) -> list[Path]:
     if not mod or not paths:
         return paths
 
+    if mod == "plane_dwell_beads":
+        pump = beat_pump(c)
+        n_beads = c.count(3, 5)
+        out = list(paths)
+        bead_budget = 14
+        for idx, p in enumerate(paths):
+            if bead_budget <= 0:
+                break
+            if len(p.pts) == 2:
+                seg_len = float(np.hypot(*(p.pts[1] - p.pts[0])))
+                if seg_len >= 0.35:
+                    col = c.palette(idx + 1, v=1.0, white_boost=0.45 * pump)
+                    beads = beam_plane_beads(
+                        p.pts[0],
+                        p.pts[1],
+                        col,
+                        count=n_beads,
+                        dwell=3,
+                        phase=c.bt * 0.25 * (1.0 if idx % 2 == 0 else -1.0),
+                        include_ends=False,
+                    )
+                    out.extend(beads)
+                    bead_budget -= len(beads)
+        return out
+
     if mod == "blackout_zone_chopper":
         step_f = c.bt * 4.0
         step = int(math.floor(step_f))
         sub = step_f - step
-        # Hard blackout gate on 42% of every 16th-note step
         if sub > 0.58:
             return []
         zone = step % 4
@@ -1565,6 +1658,9 @@ def _morph_paths(prev_paths: list[Path], next_paths: list[Path], alpha: float) -
 
 
 SCENES = {
+    # Beaded Dwell-Point Plane Scenes
+    "beaded_horizon_planes": sc_beaded_horizon_planes,
+    "beaded_sky_canopy": sc_beaded_sky_canopy,
     # Rapid Wide-Coverage Blackout Chasers
     "blackout_zone_chase": sc_blackout_zone_chase,
     "quadrant_blackout_relay": sc_quadrant_blackout_relay,
@@ -1647,18 +1743,19 @@ SCENES = {
 }
 
 QUICK_CUES: list[tuple[str, str]] = [
-    ("liquid_sky_drift", "Liquid Sky"),
-    ("laser_crown_vortex", "Laser Crown"),
+    ("beaded_sky_canopy", "Beaded Sky"),
+    ("beaded_horizon_planes", "Beaded Planes"),
     ("concentric_tunnel", "Tunnel"),
     ("blackout_zone_chase", "Blackout Chase"),
     ("infinity_lissajous", "Lissajous"),
     ("quadrant_blackout_relay", "Quad Blackout"),
-    ("cathedral_sky_vault", "Sky Vault"),
+    ("laser_crown_vortex", "Laser Crown"),
     ("shutter_grid_chase", "Shutter Chase"),
 ]
 
 POOLS = {
     MAIN: [
+        "beaded_horizon_planes",
         "blackout_zone_chase",
         "quadrant_blackout_relay",
         "shutter_grid_chase",
@@ -1687,6 +1784,7 @@ POOLS = {
         "alternating_horizon_gates",
     ],
     DROP: [
+        "beaded_horizon_planes",
         "blackout_zone_chase",
         "quadrant_blackout_relay",
         "shutter_grid_chase",
@@ -1712,6 +1810,7 @@ POOLS = {
         "drop_x_blades",
     ],
     BREAKDOWN: [
+        "beaded_sky_canopy",
         "liquid_sky_drift",
         "cathedral_sky_vault",
         "ribbon_tide_sky",
@@ -1739,9 +1838,9 @@ POOLS = {
 }
 
 MODIFIER_POOLS = {
-    MAIN: ["blackout_zone_chopper", "beat_rotate", "stereo_pan_shift", "kick_zoom_pump", "counter_sweep_plane", "hat_packet_chop"],
-    DROP: ["blackout_zone_chopper", "fast_strobe_16th", "beat_rotate", "counter_sweep_plane", "hat_packet_chop"],
-    BREAKDOWN: ["stereo_pan_shift"],
+    MAIN: ["plane_dwell_beads", "blackout_zone_chopper", "beat_rotate", "stereo_pan_shift", "kick_zoom_pump", "counter_sweep_plane", "hat_packet_chop"],
+    DROP: ["plane_dwell_beads", "blackout_zone_chopper", "fast_strobe_16th", "beat_rotate", "counter_sweep_plane", "hat_packet_chop"],
+    BREAKDOWN: ["plane_dwell_beads", "stereo_pan_shift"],
     BUILD: ["kick_zoom_pump"],
     SILENCE: [],
 }
@@ -1763,8 +1862,8 @@ DROP_IMPACT_BEATS = 1.5
 
 
 class FXEngine:
-    """High-FPS FX engine with upgraded Laser Sky, randomized per-beat Breakdown bursts,
-    rapid wide-coverage blackout chasers, Color-Theory Harmony Palettes & Art-Net RGB override."""
+    """High-FPS FX engine with upgraded Laser Sky, beaded dwell-point planes, randomized per-beat
+    Breakdown bursts, rapid wide-coverage blackout chasers, Color-Theory Harmony Palettes & Art-Net RGB override."""
 
     def __init__(self, seed: int = 1, force_scene: str | None = None):
         self.rng = np.random.default_rng(seed)
@@ -1869,7 +1968,7 @@ class FXEngine:
             self.modifier = None
             return
         pool = MODIFIER_POOLS.get(self.section, [])
-        chance = 0.55 if self.section == DROP else (0.42 if self.section == MAIN else 0.25)
+        chance = 0.62 if self.section == DROP else (0.52 if self.section == MAIN else 0.45)
         if not pool or float(self.rng.random()) > chance:
             self.modifier = None
             return
@@ -2191,6 +2290,9 @@ def sc_beam_chase_diagonals(c: Ctx) -> list[Path]:
         seg = clipped_plane(x0, 0.0, phi + math.pi / 2.0)
         if seg is not None:
             out.append(line(seg[0], seg[1], c.palette(pal, v=v, white_boost=0.5 * pump if v == 1.0 else 0.0)))
+            if v == 1.0 and c.detail >= 0.35:                      # dwell-point beads on the lead beams
+                out.extend(beam_plane_beads(seg[0], seg[1], c.palette(pal + 1, v=1.0, white_boost=0.5 + 0.4 * pump),
+                                            count=c.count(3, 5), dwell=3, phase=c.bt * 0.3, include_ends=False))
     return out
 
 
@@ -2210,6 +2312,10 @@ def sc_scissor_snap(c: Ctx) -> list[Path]:
         seg = clipped_plane(px, 0.0, -sign * a)
         if seg is not None:
             out.append(line(seg[0], seg[1], c.palette(i, v=1.0, white_boost=0.5 * pump)))
+            if c.detail >= 0.35:                                   # beads travel opposite ways on the two beams
+                out.extend(beam_plane_beads(seg[0], seg[1], c.palette(i + 2, v=1.0, white_boost=0.6 + 0.3 * pump),
+                                            count=c.count(3, 5), dwell=3, phase=c.bt * 0.25 * sign,
+                                            include_ends=False))
     if c.detail >= 0.6:
         out.append(line((-LIM, 0.0), (LIM, 0.0), c.palette(2, v=0.45)))
     return out
